@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "category": "Education",
     "shortDescription": "教师教学与班级管理一站式工具",
     "icon": [
