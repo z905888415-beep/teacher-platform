@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+npm-debug.log*
+yarn-error.log*
+.vscode/*
+!.vscode/extensions.json
+
+# Tauri
+src-tauri/target
+src-tauri/gen

@@ -1,0 +1,39 @@
+{
+  "name": "teacher-platform",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "教师个人工作平台 —— 面向教师日常教学与班级管理的一站式信息流工具（纯前端 + IndexedDB + PWA）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.app.json && vite build",
+    "preview": "vite preview",
+    "icons": "node scripts/gen-icons.mjs",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:icons": "tauri icon public/icons/icon-512.png"
+  },
+  "dependencies": {
+    "dexie": "^4.0.8",
+    "dexie-react-hooks": "^1.1.7",
+    "lucide-react": "^0.447.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "recharts": "^2.12.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.8",
+    "vite-plugin-pwa": "^0.20.5"
+  }
+}
