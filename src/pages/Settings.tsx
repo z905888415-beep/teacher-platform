@@ -87,8 +87,12 @@ export function CloudSettings() {
 
   const test = async () => {
     setStatus('正在连接…')
-    const ok = await webdavTest(cfg)
-    setStatus(ok ? '✅ 连接成功，可正常上传' : '❌ 连接失败，请检查地址与账号密码（需服务端支持 CORS）')
+    try {
+      const ok = await webdavTest(cfg)
+      setStatus(ok ? '✅ 连接成功，可正常备份/恢复' : '❌ 连接失败，请检查地址与账号密码')
+    } catch (e: any) {
+      setStatus(`❌ ${e.message}`)
+    }
   }
 
   const backup = async () => {
@@ -158,7 +162,11 @@ export function CloudSettings() {
             </div>
             {status && <p className={`text-sm ${status.startsWith('✅') ? 'text-emerald-600' : status.startsWith('❌') ? 'text-red-500' : 'text-gray-500'}`}>{status}</p>}
             <div className="text-xs text-gray-400 pt-2 border-t border-gray-100">
-              💡 提示：坚果云需在「账户信息 → 安全选项」中生成第三方应用密码。浏览器访问 WebDAV 需服务端允许跨域（坚果云支持）。
+              {typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window ? (
+                <>💡 桌面版已内置直连，不受浏览器跨域限制。坚果云需在「账户信息 → 安全选项」中生成应用密码。</>
+              ) : (
+                <>⚠️ 当前为网页版，坚果云不支持浏览器跨域，无法直连。请用「数据管理」里的「导出/导入 JSON」配合坚果云客户端迁移数据。</>
+              )}
             </div>
           </div>
         </Card>
