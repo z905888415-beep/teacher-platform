@@ -1,13 +1,23 @@
 node_modules
 dist
-dist-ssr
+release
 *.local
 .DS_Store
+
+# Local development and verification artifacts
+_uat_out/
+_uat_*.py
 npm-debug.log*
 yarn-error.log*
 .vscode/*
 !.vscode/extensions.json
 
-# Tauri
-src-tauri/target
-src-tauri/gen
+# Credentials and local AI configuration
+.env
+.env.*
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt

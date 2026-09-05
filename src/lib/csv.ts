@@ -1,76 +1,47 @@
-// 轻量 CSV 解析与序列化。导出时带 UTF-8 BOM，保证 Windows Excel 中文不乱码。
+/** 轻量 CSV 解析：支持引号转义与中英文逗号 */
 
-/** 将二维数组 / 对象数组序列化为 CSV 字符串 */
-export function toCSV(rows: (string | number | null | undefined)[][] | Record<string, unknown>[]): string {
-  const data: string[][] = []
-  if (!rows.length) return ''
-  if (Array.isArray(rows[0])) {
-    data.push(...(rows as (string | number | null | undefined)[][]).map((r) => r.map((c) => cell(c))))
-  } else {
-    const objects = rows as Record<string, unknown>[]
-    const headers = Object.keys(objects[0])
-    data.push(headers.map((h) => cell(h)))
-    objects.forEach((o) => data.push(headers.map((h) => cell(o[h]))))
-  }
-  return data.map((r) => r.join(',')).join('\r\n')
-}
-
-function cell(v: unknown): string {
-  if (v === null || v === undefined) return ''
-  const s = String(v)
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
-  return s
-}
-
-/** 解析 CSV 字符串为对象数组（首行为表头） */
-export function parseCSV(text: string): Record<string, string>[] {
-  const clean = text.replace(/^﻿/, '')
-  const rows = clean.split(/\r\n|\n|\r/).filter((r) => r.trim() !== '')
-  if (!rows.length) return []
-  const headers = parseLine(rows[0])
-  const result: Record<string, string>[] = []
-  for (let i = 1; i < rows.length; i++) {
-    const cells = parseLine(rows[i])
-    const obj: Record<string, string> = {}
-    headers.forEach((h, idx) => {
-      obj[h] = cells[idx] ?? ''
-    })
-    if (Object.values(obj).some((v) => v !== '')) result.push(obj)
-  }
-  return result
-}
-
-function parseLine(line: string): string[] {
-  const cells: string[] = []
-  let cur = ''
+export function parseCSV(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
   let inQuotes = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
+  const source = text.replace(/\r\n?/g, '\n')
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]
     if (inQuotes) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') {
-          cur += '"'
-          i++
+      if (char === '"') {
+        if (source[i + 1] === '"') {
+          field += '"'
+          i += 1
         } else {
           inQuotes = false
         }
       } else {
-        cur += ch
+        field += char
       }
-    } else if (ch === '"') {
+    } else if (char === '"') {
       inQuotes = true
-    } else if (ch === ',') {
-      cells.push(cur)
-      cur = ''
+    } else if (char === ',' || char === '，') {
+      row.push(field.trim())
+      field = ''
+    } else if (char === '\n') {
+      row.push(field.trim())
+      if (row.some((cell) => cell !== '')) rows.push(row)
+      row = []
+      field = ''
     } else {
-      cur += ch
+      field += char
     }
   }
-  cells.push(cur)
-  return cells
+  row.push(field.trim())
+  if (row.some((cell) => cell !== '')) rows.push(row)
+  return rows
 }
 
-/** 带 BOM 的 CSV 内容，用于直接下载 */
-export function csvBlob(rows: (string | number | null | undefined)[][] | Record<string, unknown>[]): Blob {
-  return new Blob(['﻿' + toCSV(rows)], { type: 'text/csv;charset=utf-8' })
+export function toCSV(headers: string[], rows: (string | number)[][]): string {
+  const escape = (value: string | number) => {
+    const text = String(value ?? '')
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+  }
+  return [headers.map(escape).join(','), ...rows.map((row) => row.map(escape).join(','))].join('\n')
 }

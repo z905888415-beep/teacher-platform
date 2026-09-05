@@ -1,263 +1,384 @@
 import { useEffect, useRef, useState } from 'react'
-import { useLiveQuery } from 'dexie-react-hooks'
-import { Database, Cloud, Lock, Download, Upload, Trash2, RefreshCw, Sparkles, KeyRound, ShieldCheck } from 'lucide-react'
-import { db, getSetting, setSetting } from '../db'
-import { exportAllJson, importAllJson, type ExportPayload } from '../lib/data-io'
-import { clearAllData, seedDemoData } from '../db/seed'
-import { webdavPut, webdavGet, webdavTest, type WebDavConfig } from '../lib/webdav'
-import { Card, Button, Input, Field, PageHeader, Badge } from '../components/ui'
+import { Download, LockKeyhole, RotateCcw, Trash2, Upload } from 'lucide-react'
+import { db } from '../db'
+import { ensureSeedData } from '../db/seed'
+import { backupSummary, clearAllData, exportBackup, downloadBackup, parseBackup, restoreBackup, BackupError, formatIssues } from '../lib/backup'
+import { hashPassword, verifyPassword } from '../lib/crypto'
+import { setSetting, useSetting } from '../hooks/useSetting'
+import { Badge, Button, Field, Input, Modal, Panel, Select } from '../components/ui'
+import { useToast } from '../contexts/ToastContext'
+import { DEFAULT_PERIOD_TIMES } from '../lib/dates'
+import { useClassManager } from '../contexts/ClassContext'
 
-// ============ 数据管理 ============
-export function DataSettings() {
+export function Settings() {
+  const { showToast } = useToast()
+  const { archivedClasses, restoreClass } = useClassManager()
+  const semesterLabel = useSetting('semesterLabel', '2026–2027 学年第一学期')
+  const semesterStart = useSetting('semesterStart', `${new Date().getFullYear()}-08-31`)
+  const periodCount = useSetting('periodCount', '6')
+  const periodTimesRaw = useSetting('periodTimes', '')
+  const passwordHash = useSetting('passwordHash', '')
+
   const fileRef = useRef<HTMLInputElement>(null)
-  const [busy, setBusy] = useState(false)
-  const counts = useLiveQuery(async () => {
-    const tables = ['students', 'scores', 'exams', 'todos', 'courses', 'events', 'communication', 'borderline']
-    const result: Record<string, number> = {}
-    for (const t of tables) result[t] = await db.table(t).count()
-    return result
-  }, []) ?? {}
+  const [periodDraft, setPeriodDraft] = useState(periodTimesRaw)
+  const [periodError, setPeriodError] = useState<string | null>(null)
+  const [importPreview, setImportPreview] = useState<{
+    text: string
+    counts: { name: string; count: number }[]
+    converted: string[]
+    ignored: { name: string; count: number; reason: string }[]
+    issues: string[]
+  } | null>(null)
+  const [clearOpen, setClearOpen] = useState(false)
+  const [resetOpen, setResetOpen] = useState(false)
+  const [pw1, setPw1] = useState('')
+  const [pw2, setPw2] = useState('')
+  const [pwError, setPwError] = useState<string | null>(null)
+  const [disablePw, setDisablePw] = useState('')
 
-  const onImport = async (file: File) => {
-    if (!confirm('导入将覆盖当前数据（默认清空后恢复）。确定继续？')) return
-    setBusy(true)
-    try {
-      const n = await importAllJson(file, { clear: true })
-      alert(`成功恢复 ${n} 条记录`)
-    } catch (e: any) {
-      alert(`导入失败：${e.message}`)
-    } finally {
-      setBusy(false)
-    }
+  const handleExport = async () => {
+    const backup = await exportBackup()
+    downloadBackup(backup)
+    showToast('备份已导出，请注意备份文件包含学生与家长信息')
   }
-
-  return (
-    <div>
-      <PageHeader title="数据管理" subtitle="本地数据导入导出与备份" />
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-5">
-          <h3 className="font-semibold text-gray-800 flex items-center gap-2"><Database size={18} className="text-brand-600" />本地数据</h3>
-          <div className="grid grid-cols-4 gap-3 my-4">
-            {[['学生', counts.students], ['成绩', counts.scores], ['考试', counts.exams], ['待办', counts.todos]].map(([k, v]) => (
-              <div key={k as string} className="text-center p-2 rounded-lg bg-gray-50">
-                <p className="text-lg font-bold text-gray-800">{v ?? 0}</p>
-                <p className="text-xs text-gray-400">{k}</p>
-              </div>
-            ))}
-          </div>
-          <p className="text-xs text-gray-400 mb-3">所有数据仅保存在本机浏览器（IndexedDB），不上传到任何服务器，充分保护隐私。</p>
-        </Card>
-
-        <Card className="p-5">
-          <h3 className="font-semibold text-gray-800 flex items-center gap-2"><Sparkles size={18} className="text-amber-500" />备份与恢复</h3>
-          <div className="space-y-3 mt-4">
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={exportAllJson}><Download size={15} />导出全部数据（JSON）</Button>
-              <Button variant="outline" onClick={() => fileRef.current?.click()} disabled={busy}><Upload size={15} />{busy ? '恢复中…' : '从备份恢复'}</Button>
-              <input ref={fileRef} type="file" accept=".json" className="hidden" onChange={(e) => e.target.files?.[0] && onImport(e.target.files[0])} />
-            </div>
-            <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-100">
-              <Button variant="secondary" size="sm" onClick={async () => { await seedDemoData(); alert('已载入示例数据（若已有数据则不覆盖）') }}><RefreshCw size={14} />载入示例数据</Button>
-              <Button variant="danger" size="sm" onClick={async () => { if (confirm('确定清空所有数据？此操作不可撤销！')) { await clearAllData(); alert('已清空') } }}><Trash2 size={14} />清空所有数据</Button>
-            </div>
-          </div>
-        </Card>
-      </div>
-    </div>
-  )
-}
-
-// ============ 云同步 ============
-export function CloudSettings() {
-  const [cfg, setCfg] = useState<WebDavConfig>({ url: '', username: '', password: '', autoBackup: false, intervalDays: 7 })
-  const [status, setStatus] = useState('')
 
   useEffect(() => {
-    ;(async () => {
-      const saved = await getSetting<WebDavConfig>('webdav')
-      if (saved) setCfg(saved)
-    })()
-  }, [])
+    setPeriodDraft(periodTimesRaw)
+  }, [periodTimesRaw])
 
-  const save = async () => {
-    await setSetting('webdav', cfg)
-    setStatus('✅ 配置已保存')
-    setTimeout(() => setStatus(''), 2000)
-  }
-
-  const test = async () => {
-    setStatus('正在连接…')
+  const savePeriodTimes = () => {
+    if (!periodDraft.trim()) {
+      setPeriodError(null)
+      void setSetting('periodTimes', '')
+      showToast('已改回默认节次时间')
+      return
+    }
     try {
-      const ok = await webdavTest(cfg)
-      setStatus(ok ? '✅ 连接成功，可正常备份/恢复' : '❌ 连接失败，请检查地址与账号密码')
-    } catch (e: any) {
-      setStatus(`❌ ${e.message}`)
+      const parsed = JSON.parse(periodDraft) as unknown
+      if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string' || !item.includes('-'))) {
+        setPeriodError('请输入字符串数组，例如 ["08:00-08:45","08:55-09:40"]')
+        return
+      }
+      setPeriodError(null)
+      void setSetting('periodTimes', JSON.stringify(parsed))
+      showToast('节次时间已保存')
+    } catch {
+      setPeriodError('JSON 不完整，未保存。首页将继续使用默认节次时间。')
     }
   }
 
-  const backup = async () => {
-    setStatus('正在备份…')
+  const handleFile = async (file: File) => {
     try {
-      const tables: Record<string, unknown[]> = {}
-      const names = ['students', 'scores', 'exams', 'courses', 'events', 'todos', 'communication', 'cadres', 'seats', 'duty', 'rewards', 'leaves', 'concerns', 'classFund', 'classLog', 'attendance', 'goals', 'career', 'psychology', 'talks', 'comprehensive', 'borderline', 'countdowns', 'aiTools', 'officeTools', 'docTemplates', 'fileTools', 'subjectTeachers', 'teachingProgress', 'homework', 'meetings', 'templates', 'resources', 'teachingRecords', 'classMeetings', 'dormitory', 'morningEvening', 'safetyHealth', 'parentMeetings', 'homeVisits', 'familySituation', 'notifications', 'collegeEntrance', 'funding', 'examSummaries']
-      for (const n of names) tables[n] = await db.table(n).toArray()
-      const payload: ExportPayload = { app: 'teacher-platform', version: 1, exportedAt: new Date().toISOString(), tables }
-      await webdavPut(cfg, `backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload))
-      setStatus('✅ 备份成功')
-    } catch (e: any) {
-      setStatus(`❌ 备份失败：${e.message}`)
-    }
-  }
-
-  const restore = async () => {
-    setStatus('正在恢复…')
-    try {
-      const filename = prompt('请输入备份文件名（如 backup-2026-08-24.json）：', `backup-${new Date().toISOString().slice(0, 10)}.json`)
-      if (!filename) return
-      const text = await webdavGet(cfg, filename)
-      const payload = JSON.parse(text) as ExportPayload
-      await db.transaction('rw', db.tables, async () => {
-        for (const [name, rows] of Object.entries(payload.tables)) {
-          if (rows?.length) await db.table(name).bulkPut(rows)
-        }
+      const text = await file.text()
+      const { backup, summary } = parseBackup(text)
+      setImportPreview({
+        text,
+        counts: backupSummary(backup),
+        converted: summary.converted,
+        ignored: summary.ignored,
+        issues: summary.issues.map((issue) => `${issue.table} 第 ${issue.row} 行「${issue.field}」：${issue.message}`),
       })
-      setStatus('✅ 恢复成功')
-    } catch (e: any) {
-      setStatus(`❌ 恢复失败：${e.message}`)
+    } catch (error) {
+      const message =
+        error instanceof BackupError
+          ? error.issues.length
+            ? formatIssues(error.issues)
+            : error.message
+          : error instanceof Error
+            ? error.message
+            : '备份文件解析失败'
+      showToast(message, { error: true })
     }
   }
 
-  return (
-    <div>
-      <PageHeader title="云同步（WebDAV）" subtitle="连接坚果云等 WebDAV，实现多设备备份" />
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-5">
-          <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-4"><Cloud size={18} className="text-brand-600" />服务器配置</h3>
-          <div className="space-y-3">
-            <Field label="WebDAV 地址" hint="坚果云：https://dav.jianguoyun.com/dav/">
-              <Input value={cfg.url} onChange={(e) => setCfg({ ...cfg, url: e.target.value })} placeholder="https://dav.jianguoyun.com/dav/" />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="账号"><Input value={cfg.username} onChange={(e) => setCfg({ ...cfg, username: e.target.value })} /></Field>
-              <Field label="应用密码"><Input type="password" value={cfg.password} onChange={(e) => setCfg({ ...cfg, password: e.target.value })} /></Field>
-            </div>
-            <label className="flex items-center gap-2 text-sm text-gray-600">
-              <input type="checkbox" checked={cfg.autoBackup} onChange={(e) => setCfg({ ...cfg, autoBackup: e.target.checked })} />
-              自动备份
-            </label>
-            {cfg.autoBackup && (
-              <Field label="备份间隔（天）"><Input type="number" value={cfg.intervalDays} onChange={(e) => setCfg({ ...cfg, intervalDays: Number(e.target.value) })} /></Field>
-            )}
-            <Button onClick={save}>保存配置</Button>
-          </div>
-        </Card>
-
-        <Card className="p-5">
-          <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-4"><ShieldCheck size={18} className="text-emerald-600" />操作</h3>
-          <div className="space-y-3">
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={test}>测试连接</Button>
-              <Button onClick={backup}><Cloud size={15} />立即备份</Button>
-              <Button variant="outline" onClick={restore}><Download size={15} />从云端恢复</Button>
-            </div>
-            {status && <p className={`text-sm ${status.startsWith('✅') ? 'text-emerald-600' : status.startsWith('❌') ? 'text-red-500' : 'text-gray-500'}`}>{status}</p>}
-            <div className="text-xs text-gray-400 pt-2 border-t border-gray-100">
-              {typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window ? (
-                <>💡 桌面版已内置直连，不受浏览器跨域限制。坚果云需在「账户信息 → 安全选项」中生成应用密码。</>
-              ) : (
-                <>⚠️ 当前为网页版，坚果云不支持浏览器跨域，无法直连。请用「数据管理」里的「导出/导入 JSON」配合坚果云客户端迁移数据。</>
-              )}
-            </div>
-          </div>
-        </Card>
-      </div>
-    </div>
-  )
-}
-
-// ============ 密码保护 ============
-export function SecuritySettings() {
-  const [pwd, setPwdState] = useState('')
-  const [confirmPwd, setConfirmPwd] = useState('')
-  const [hasPwd, setHasPwd] = useState(false)
-
-  useLiveQuery(async () => {
-    const p = await getSetting<string>('password', '')
-    setHasPwd(!!p)
-  }, [])
-
-  const enablePassword = async () => {
-    if (!pwd) return alert('请输入密码')
-    if (pwd !== confirmPwd) return alert('两次输入的密码不一致')
-    await setSetting('password', pwd)
-    alert('✅ 密码已设置，下次打开将要求验证')
-    setPwdState(''); setConfirmPwd(''); setHasPwd(true)
+  const confirmRestore = async () => {
+    if (!importPreview) return
+    try {
+      const { backup, summary } = parseBackup(importPreview.text)
+      if (summary.issues.some((issue) => issue.message === '记录不是对象')) {
+        showToast(formatIssues(summary.issues), { error: true })
+        return
+      }
+      await restoreBackup(backup)
+      const extra = [
+        ...summary.converted,
+        ...summary.ignored.map((item) => `忽略 ${item.name} ${item.count} 条`),
+      ]
+      showToast(extra.length ? `备份已恢复。${extra.join('；')}` : '备份已恢复')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '恢复失败，请根据提示检查表、行和字段', { error: true })
+    }
+    setImportPreview(null)
   }
 
-  const removePwd = async () => {
-    if (!window.confirm('确定移除密码保护？')) return
-    await setSetting('password', '')
-    setHasPwd(false)
-    alert('已移除密码')
+  const handleSetPassword = async () => {
+    if (pw1.length < 4) {
+      setPwError('密码至少 4 位')
+      return
+    }
+    if (pw1 !== pw2) {
+      setPwError('两次输入的密码不一致')
+      return
+    }
+    await setSetting('passwordHash', await hashPassword(pw1))
+    setPw1('')
+    setPw2('')
+    setPwError(null)
+    showToast('访问密码已开启，下次打开应用生效')
+  }
+
+  const handleDisablePassword = async () => {
+    const stored = passwordHash
+    if (!stored) return
+    if (!(await verifyPassword(disablePw, stored))) {
+      showToast('密码不正确', { error: true })
+      return
+    }
+    await setSetting('passwordHash', '')
+    sessionStorage.removeItem('tw-unlocked')
+    setDisablePw('')
+    showToast('访问密码已关闭')
+  }
+
+  const handleResetSample = async () => {
+    await clearAllData()
+    // F01：清除种子标记，ensureSeedData 才会重新灌入示例数据
+    await db.settings.delete('seededAt')
+    await db.settings.bulkPut([
+      { key: 'semesterLabel', value: semesterLabel },
+      { key: 'semesterStart', value: semesterStart },
+      { key: 'periodCount', value: periodCount },
+      { key: 'periodTimes', value: periodTimesRaw },
+      { key: 'passwordHash', value: passwordHash },
+    ])
+    await ensureSeedData()
+    setResetOpen(false)
+    showToast('示例数据已重置')
   }
 
   return (
-    <div>
-      <PageHeader title="密码保护" subtitle="设置访问密码，保护本地数据" />
-      <Card className="p-5 max-w-md">
-        <div className="flex items-center gap-2 mb-4">
-          <Lock size={18} className="text-brand-600" />
-          <h3 className="font-semibold text-gray-800">访问密码</h3>
-          {hasPwd ? <Badge color="green">已启用</Badge> : <Badge>未启用</Badge>}
+    <div className="grid grid-cols-1 gap-3.5 min-[900px]:grid-cols-2">
+      <Panel title="学期与课表" bodyClassName="p-4">
+        <Field label="当前学期" htmlFor="set-semester">
+          <Select
+            id="set-semester"
+            value={semesterLabel}
+            onChange={(event) => setSetting('semesterLabel', event.target.value)}
+          >
+            <option value="2026–2027 学年第一学期">2026–2027 学年第一学期</option>
+            <option value="2026–2027 学年第二学期">2026–2027 学年第二学期</option>
+          </Select>
+        </Field>
+        <Field label="学期开始日期" htmlFor="set-start" hint="用于计算教学周次与单双周。">
+          <Input id="set-start" type="date" value={semesterStart} onChange={(event) => setSetting('semesterStart', event.target.value)} />
+        </Field>
+        <Field label="每天节次数量" htmlFor="set-periods" hint="课表格按此数量显示（4–9 节）。">
+          <Select
+            id="set-periods"
+            value={periodCount}
+            onChange={(event) => setSetting('periodCount', event.target.value)}
+          >
+            {[4, 5, 6, 7, 8, 9].map((count) => (
+              <option key={count} value={String(count)}>
+                {count} 节
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field
+          label="节次时间（JSON，可选）"
+          htmlFor="set-times"
+          error={periodError ?? undefined}
+          hint={`留空使用默认时间：${DEFAULT_PERIOD_TIMES[0]} … 修改后点保存，非法 JSON 不会写入。`}
+        >
+          <Input
+            id="set-times"
+            value={periodDraft}
+            placeholder='例如 ["08:00-08:45","08:55-09:40"]'
+            onChange={(event) => {
+              setPeriodDraft(event.target.value)
+              setPeriodError(null)
+            }}
+          />
+        </Field>
+        <Button onClick={savePeriodTimes}>保存节次时间</Button>
+      </Panel>
+
+      <Panel title="归档班级" subtitle="归档后班级从选择器隐藏，数据保留，可在此恢复" bodyClassName="p-4">
+        {archivedClasses.length === 0 ? (
+          <p className="text-xs text-ink-500">没有归档班级</p>
+        ) : (
+          <ul className="grid gap-2">
+            {archivedClasses.map((item) => (
+              <li key={item.id} className="flex items-center justify-between gap-2 rounded-menu border border-line px-3 py-2">
+                <span className="text-sm font-semibold text-ink-900">{item.name}</span>
+                <Button
+                  onClick={() => {
+                    if (item.id != null) void restoreClass(item.id)
+                  }}
+                >
+                  恢复
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+
+      <Panel title="备份与恢复" subtitle="数据保存在本机 IndexedDB；导出文件包含学生与家长信息，请妥善保管" bodyClassName="p-4">
+        <div className="flex flex-wrap gap-2">
+          <Button variant="primary" onClick={handleExport}>
+            <Download size={14} /> 导出完整备份（JSON）
+          </Button>
+          <Button onClick={() => fileRef.current?.click()}>
+            <Upload size={14} /> 导入备份
+          </Button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0]
+              if (file) handleFile(file)
+              event.target.value = ''
+            }}
+          />
         </div>
-        {hasPwd ? (
-          <div className="space-y-3">
-            <p className="text-sm text-gray-500">已设置密码保护。移除后可取消。</p>
-            <Button variant="danger" onClick={removePwd}><Trash2 size={15} />移除密码</Button>
+        <p className="mt-3 text-xs leading-5 text-ink-500">
+          恢复将覆盖当前全部数据，导入前会先显示备份内容预览；旧版本备份中无法识别的表会被忽略，不会导致恢复失败。
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-line pt-4">
+          <Button variant="dangerSoft" onClick={() => setClearOpen(true)}>
+            <Trash2 size={14} /> 清空全部数据
+          </Button>
+          <Button variant="secondary" onClick={() => setResetOpen(true)}>
+            <RotateCcw size={14} /> 重置为示例数据
+          </Button>
+        </div>
+      </Panel>
+
+      <Panel title="访问密码" subtitle="仅用于应用访问保护，不作为强加密" bodyClassName="p-4">
+        {passwordHash ? (
+          <div>
+            <p className="mb-3 flex items-center gap-2 text-sm text-ink-700">
+              <LockKeyhole size={15} className="text-brand-600" /> 已开启访问密码 <Badge variant="blue">生效中</Badge>
+            </p>
+            <Field label="关闭密码：输入当前密码" htmlFor="pw-disable">
+              <Input
+                id="pw-disable"
+                type="password"
+                value={disablePw}
+                autoComplete="current-password"
+                onChange={(event) => setDisablePw(event.target.value)}
+              />
+            </Field>
+            <Button variant="dangerSoft" onClick={handleDisablePassword}>
+              关闭访问密码
+            </Button>
           </div>
         ) : (
-          <div className="space-y-3">
-            <Field label="设置密码"><Input type="password" value={pwd} onChange={(e) => setPwdState(e.target.value)} placeholder="4 位以上" /></Field>
-            <Field label="确认密码"><Input type="password" value={confirmPwd} onChange={(e) => setConfirmPwd(e.target.value)} /></Field>
-            <Button onClick={enablePassword}><KeyRound size={15} />启用密码保护</Button>
+          <div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="新密码" htmlFor="pw-new">
+                <Input id="pw-new" type="password" value={pw1} autoComplete="new-password" onChange={(event) => setPw1(event.target.value)} />
+              </Field>
+              <Field label="确认密码" htmlFor="pw-confirm">
+                <Input id="pw-confirm" type="password" value={pw2} autoComplete="new-password" onChange={(event) => setPw2(event.target.value)} />
+              </Field>
+            </div>
+            {pwError && <p className="mb-3 text-xs text-danger-600">{pwError}</p>}
+            <Button variant="primary" onClick={handleSetPassword}>
+              开启访问密码
+            </Button>
           </div>
         )}
-      </Card>
-    </div>
-  )
-}
+      </Panel>
 
-// ============ 密码解锁（应用入口） ============
-export function SecurityLock({ onUnlock }: { onUnlock: () => void }) {
-  const [pwd, setPwd] = useState('')
-  const [error, setError] = useState(false)
+      <Panel title="关于" bodyClassName="p-4">
+        <ul className="grid gap-2 text-xs leading-5 text-ink-500">
+          <li>· 本地优先：所有数据保存在本机浏览器 IndexedDB，不依赖学校统一信息系统。</li>
+          <li>· 离线可用：断网时除云备份外的核心功能均可正常使用。</li>
+          <li>· 隐私：默认不上传任何学生数据；导出备份时请注意文件包含家长联系方式。</li>
+          <li>· 版本：0.1.0（P0 日常工作台）。</li>
+        </ul>
+      </Panel>
 
-  const unlock = async () => {
-    const real = await getSetting<string>('password', '')
-    if (pwd === real) onUnlock()
-    else { setError(true); setPwd('') }
-  }
+      {/* 恢复预览确认 */}
+      <Modal
+        open={importPreview != null}
+        onClose={() => setImportPreview(null)}
+        title="确认恢复备份"
+        footer={
+          <>
+            <Button onClick={() => setImportPreview(null)}>取消</Button>
+            <Button variant="danger" onClick={confirmRestore}>
+              覆盖并恢复
+            </Button>
+          </>
+        }
+      >
+        <p className="mb-3">恢复将清空当前数据并写入备份内容。备份包含：</p>
+        <ul className="mb-3 grid grid-cols-2 gap-1.5">
+          {importPreview?.counts.map((item) => (
+            <li key={item.name} className="flex justify-between rounded-menu border border-line px-2.5 py-1 text-xs">
+              <span className="text-ink-500">{item.name}</span>
+              <span className="font-semibold tabular-nums text-ink-900">{item.count}</span>
+            </li>
+          ))}
+        </ul>
+        {importPreview?.converted && importPreview.converted.length > 0 && (
+          <p className="mb-2 text-xs text-ink-700">转换：{importPreview.converted.join('；')}</p>
+        )}
+        {importPreview?.ignored && importPreview.ignored.length > 0 && (
+          <p className="mb-2 text-xs text-ink-500">
+            已忽略：{importPreview.ignored.map((item) => `${item.name}（${item.reason}）`).join('；')}
+          </p>
+        )}
+        {importPreview?.issues && importPreview.issues.length > 0 && (
+          <p className="mb-2 text-xs text-danger-600">字段问题：{importPreview.issues.slice(0, 6).join('；')}</p>
+        )}
+        <p className="text-xs text-danger-600">此操作不可撤销，建议先导出当前数据。</p>
+      </Modal>
 
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
-      <div className="w-full max-w-sm">
-        <div className="flex flex-col items-center mb-6">
-          <div className="w-14 h-14 rounded-2xl bg-brand-600 flex items-center justify-center text-white mb-3"><Lock size={26} /></div>
-          <h1 className="text-lg font-bold text-gray-800">教师工作平台</h1>
-          <p className="text-sm text-gray-400">请输入访问密码</p>
-        </div>
-        <input
-          type="password"
-          value={pwd}
-          onChange={(e) => { setPwd(e.target.value); setError(false) }}
-          onKeyDown={(e) => e.key === 'Enter' && unlock()}
-          placeholder="密码"
-          autoFocus
-          className={`w-full rounded-xl border px-4 py-3 text-center text-lg outline-none ${error ? 'border-red-400' : 'border-gray-300 focus:border-brand-500'}`}
-        />
-        {error && <p className="mt-2 text-sm text-red-500 text-center">密码错误，请重试</p>}
-        <button onClick={unlock} className="w-full mt-4 bg-brand-600 text-white rounded-xl py-3 font-medium hover:bg-brand-700">解锁</button>
-      </div>
+      <Modal
+        open={clearOpen}
+        onClose={() => setClearOpen(false)}
+        title="清空全部数据"
+        footer={
+          <>
+            <Button onClick={() => setClearOpen(false)}>取消</Button>
+            <Button
+              variant="danger"
+              onClick={async () => {
+                await clearAllData()
+                setClearOpen(false)
+                showToast('已清空全部业务数据')
+              }}
+            >
+              确认清空
+            </Button>
+          </>
+        }
+      >
+        将删除班级、学生、课表、待办、校历等全部业务数据（保留学期设置与密码）。此操作不可恢复，建议先导出备份。
+      </Modal>
+
+      <Modal
+        open={resetOpen}
+        onClose={() => setResetOpen(false)}
+        title="重置为示例数据"
+        footer={
+          <>
+            <Button onClick={() => setResetOpen(false)}>取消</Button>
+            <Button variant="danger" onClick={handleResetSample}>
+              重置
+            </Button>
+          </>
+        }
+      >
+        将清空全部业务数据并重新写入一套初中数学教师示例数据（初二（3）班、初二（5）班）。
+      </Modal>
     </div>
   )
 }

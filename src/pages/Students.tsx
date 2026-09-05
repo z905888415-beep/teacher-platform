@@ -1,259 +1,506 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { Plus, Download, Upload, Pencil, Trash2, Users } from 'lucide-react'
-import { db } from '../db'
-import { Card, Button, Modal, Input, Select, Textarea, Field, PageHeader, EmptyState, SearchInput, ConfirmDialog, Badge } from '../components/ui'
-import { exportTableCsv, exportTableExcel, readSpreadsheet } from '../lib/data-io'
-import { GENDERS, SUBJECTS } from '../lib/types'
+import { Download, Eye, EyeOff, FileSpreadsheet, FileDown, Plus, Trash2, Upload } from 'lucide-react'
+import { db, nowISO, type Student } from '../db'
+import { parseCSV } from '../lib/csv'
+import { downloadStudentExample40, downloadStudentExport, downloadStudentTemplate } from '../lib/studentExcel'
+import { Badge, Button, Drawer, EmptyState, Field, Input, Modal, Panel, Select, Textarea } from '../components/ui'
+import { StudentExcelImportDialog } from '../components/students/StudentExcelImportDialog'
+import { useToast } from '../contexts/ToastContext'
+import { useClassManager } from '../contexts/ClassContext'
 
-type TabKey = 'basic' | 'roster' | 'records'
-
-const TABS: { key: TabKey; label: string }[] = [
-  { key: 'basic', label: '学生名单' },
-  { key: 'roster', label: '花名册' },
-  { key: 'records', label: '学籍信息' },
-]
-
-const TAB_COLS: Record<TabKey, { key: string; label: string }[]> = {
-  basic: [
-    { key: 'studentNo', label: '学号' }, { key: 'name', label: '姓名' },
-    { key: 'gender', label: '性别' }, { key: 'selection', label: '选科' },
-    { key: 'classId', label: '班级' },
-  ],
-  roster: [
-    { key: 'name', label: '姓名' }, { key: 'parentName', label: '家长' },
-    { key: 'parentPhone', label: '家长电话' }, { key: 'address', label: '住址' },
-    { key: 'emergencyContact', label: '紧急联系人' },
-  ],
-  records: [
-    { key: 'name', label: '姓名' }, { key: 'regNo', label: '学籍号' },
-    { key: 'idCard', label: '身份证号' }, { key: 'hukou', label: '户籍' },
-    { key: 'classId', label: '班级' },
-  ],
+interface StudentDraft {
+  studentNo: string
+  name: string
+  gender: string
+  birthday: string
+  parentName: string
+  parentPhone: string
+  emergencyContact: string
+  boarding: string
+  note: string
 }
 
-export default function StudentPage({ initialTab = 'basic' }: { initialTab?: TabKey }) {
-  const students = useLiveQuery(() => db.table('students').toArray(), []) ?? []
-  const [tab, setTab] = useState<TabKey>(initialTab)
-  const [query, setQuery] = useState('')
-  const [classFilter, setClassFilter] = useState('')
-  const [editing, setEditing] = useState<any | null>(null)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [deleting, setDeleting] = useState<any | null>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
+const EMPTY_DRAFT: StudentDraft = {
+  studentNo: '',
+  name: '',
+  gender: '男',
+  birthday: '',
+  parentName: '',
+  parentPhone: '',
+  emergencyContact: '',
+  boarding: '走读',
+  note: '',
+}
 
-  const classes = useMemo(() => [...new Set(students.map((s) => s.classId).filter(Boolean))], [students])
+function StudentFormDrawer({
+  open,
+  student,
+  classId,
+  onClose,
+}: {
+  open: boolean
+  student: Student | null
+  classId: number
+  onClose: () => void
+}) {
+  const { showToast } = useToast()
+  const [draft, setDraft] = useState<StudentDraft>(EMPTY_DRAFT)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
 
-  const filtered = useMemo(() => {
-    let list = students
-    if (classFilter) list = list.filter((s) => s.classId === classFilter)
-    if (query.trim()) {
-      const q = query.trim().toLowerCase()
-      list = list.filter((s) =>
-        [s.name, s.studentNo, s.selection, s.parentName, s.parentPhone, s.regNo, s.idCard].some((v) => (v || '').toLowerCase().includes(q)),
-      )
+  useEffect(() => {
+    if (!open) return
+    setError(null)
+    if (student) {
+      setDraft({
+        studentNo: student.studentNo ?? '',
+        name: student.name,
+        gender: student.gender ?? '男',
+        birthday: student.birthday ?? '',
+        parentName: student.parentName ?? '',
+        parentPhone: student.parentPhone ?? '',
+        emergencyContact: student.emergencyContact ?? '',
+        boarding: student.boarding ?? '走读',
+        note: student.note ?? '',
+      })
+    } else {
+      setDraft(EMPTY_DRAFT)
     }
-    return [...list].sort((a, b) => (a.studentNo || '').localeCompare(b.studentNo || ''))
-  }, [students, query, classFilter])
+  }, [open, student])
 
-  const cols = TAB_COLS[tab]
+  const update = (patch: Partial<StudentDraft>) => setDraft((prev) => ({ ...prev, ...patch }))
 
-  const onImport = async (file: File) => {
-    try {
-      const data = await readSpreadsheet(file)
-      const mapped = data.map((row) => {
-        const item: any = {}
-        const pick = (keys: string[]) => keys.forEach((k) => { if (row[k] !== undefined && row[k] !== '') item[k] = row[k] })
-        pick(['studentNo', 'name', 'gender', 'classId', 'selection', 'birthday', 'remark', 'parentName', 'parentPhone', 'address', 'emergencyContact', 'familySituation', 'regNo', 'idCard', 'hukou', 'health', 'allergy', 'dorm', 'boardingType', 'pickup'])
-        // 兼容中文字段名
-        const zhMap: Record<string, string> = { 学号: 'studentNo', 姓名: 'name', 性别: 'gender', 班级: 'classId', 选科: 'selection', 家长: 'parentName', '家长电话': 'parentPhone', 住址: 'address', 学籍号: 'regNo', 身份证号: 'idCard' }
-        Object.entries(zhMap).forEach(([zh, en]) => { if (row[zh] !== undefined && row[zh] !== '' && item[en] === undefined) item[en] = row[zh] })
-        return item
-      }).filter((i) => i.name)
-      if (!mapped.length) return alert('未识别到有效学生数据（需要「姓名」列）')
-      await db.table('students').bulkAdd(mapped)
-      alert(`成功导入 ${mapped.length} 名学生`)
-    } catch (e: any) {
-      alert(`导入失败：${e.message}`)
+  const handleSave = async () => {
+    if (!draft.name.trim()) {
+      setError('请填写学生姓名')
+      return
     }
-  }
-
-  const onExport = () => {
-    const out = filtered.map((s) => ({
-      学号: s.studentNo, 姓名: s.name, 性别: s.gender, 班级: s.classId, 选科: s.selection,
-      家长: s.parentName, 家长电话: s.parentPhone, 住址: s.address, 紧急联系人: s.emergencyContact,
-      学籍号: s.regNo, 身份证号: s.idCard, 户籍: s.hukou, 宿舍: s.dorm, 类型: s.boardingType,
-    }))
-    exportTableCsv('学生名单.csv', out)
-    exportTableExcel('学生名单', out)
+    if (!classId) {
+      setError('请先在顶部选择班级')
+      return
+    }
+    setSaving(true)
+    const stamp = nowISO()
+    const payload = {
+      studentNo: draft.studentNo.trim() || undefined,
+      name: draft.name.trim(),
+      gender: draft.gender,
+      birthday: draft.birthday || undefined,
+      parentName: draft.parentName.trim() || undefined,
+      parentPhone: draft.parentPhone.trim() || undefined,
+      emergencyContact: draft.emergencyContact.trim() || undefined,
+      boarding: draft.boarding,
+      note: draft.note.trim() || undefined,
+    }
+    if (student?.id != null) {
+      await db.students.update(student.id, { ...payload, updatedAt: stamp })
+      showToast('学生信息已更新')
+    } else {
+      await db.students.add({ ...payload, classId, createdAt: stamp, updatedAt: stamp })
+      showToast('学生已添加')
+    }
+    setSaving(false)
+    onClose()
   }
 
   return (
-    <div>
-      <PageHeader
-        title="学生管理"
-        subtitle={`共 ${students.length} 名学生${classFilter ? ` · ${classFilter}` : ''}`}
-        actions={
-          <>
-            <Button variant="outline" size="sm" onClick={onExport}><Download size={15} />导出</Button>
-            <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()}><Upload size={15} />导入</Button>
-            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={(e) => e.target.files?.[0] && onImport(e.target.files[0])} />
-            <Button size="sm" onClick={() => { setEditing(null); setModalOpen(true) }}><Plus size={15} />新增学生</Button>
-          </>
-        }
-      />
-
-      {/* Tab */}
-      <div className="flex gap-1 border-b border-gray-200 mb-4 overflow-x-auto">
-        {TABS.map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key)}
-            className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors ${tab === t.key ? 'border-brand-600 text-brand-700' : 'border-transparent text-gray-500'}`}>
-            {t.label}
-          </button>
-        ))}
+    <Drawer
+      open={open}
+      onClose={onClose}
+      title={student ? '学生详情' : '新增学生'}
+      footer={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button variant="primary" loading={saving} onClick={handleSave}>
+            保存
+          </Button>
+        </>
+      }
+    >
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="姓名" error={error ?? undefined} htmlFor="student-name">
+          <Input id="student-name" value={draft.name} onChange={(event) => update({ name: event.target.value })} />
+        </Field>
+        <Field label="班内编号" htmlFor="student-no">
+          <Input id="student-no" value={draft.studentNo} placeholder="例如：01" onChange={(event) => update({ studentNo: event.target.value })} />
+        </Field>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="性别" htmlFor="student-gender">
+          <Select id="student-gender" value={draft.gender} onChange={(event) => update({ gender: event.target.value })}>
+            <option value="男">男</option>
+            <option value="女">女</option>
+          </Select>
+        </Field>
+        <Field label="生日" htmlFor="student-birthday">
+          <Input id="student-birthday" type="date" value={draft.birthday} onChange={(event) => update({ birthday: event.target.value })} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="家长姓名" htmlFor="student-parent">
+          <Input id="student-parent" value={draft.parentName} onChange={(event) => update({ parentName: event.target.value })} />
+        </Field>
+        <Field label="家长电话" htmlFor="student-phone">
+          <Input id="student-phone" value={draft.parentPhone} onChange={(event) => update({ parentPhone: event.target.value })} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="紧急联系人" htmlFor="student-emergency">
+          <Input id="student-emergency" value={draft.emergencyContact} onChange={(event) => update({ emergencyContact: event.target.value })} />
+        </Field>
+        <Field label="住宿类型" htmlFor="student-boarding">
+          <Select id="student-boarding" value={draft.boarding} onChange={(event) => update({ boarding: event.target.value })}>
+            <option value="走读">走读</option>
+            <option value="住宿">住宿</option>
+            <option value="午托">午托</option>
+          </Select>
+        </Field>
+      </div>
+      <Field label="敏感备注（仅详情可见，列表不展示）" htmlFor="student-note">
+        <Textarea id="student-note" value={draft.note} onChange={(event) => update({ note: event.target.value })} />
+      </Field>
+    </Drawer>
+  )
+}
 
-      <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
-        <SearchInput value={query} onChange={setQuery} placeholder="搜索姓名 / 学号 / 电话…" />
-        <Select value={classFilter} onChange={(e) => setClassFilter(e.target.value)} className="w-auto min-w-[140px]">
-          <option value="">全部班级</option>
-          {classes.map((c) => <option key={c} value={c}>{c}</option>)}
-        </Select>
+/** CSV 粘贴导入：首行表头需包含「姓名」 */
+function ImportDialog({ open, onClose, classId }: { open: boolean; onClose: () => void; classId: number }) {
+  const { showToast } = useToast()
+  const [text, setText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const rows = text.trim() ? parseCSV(text) : []
+  const header = rows[0] ?? []
+  const nameIndex = header.findIndex((cell) => cell.includes('姓名'))
+  const invalid = text.trim() && nameIndex === -1 ? '首行需要包含「姓名」列' : null
+  const importCount = nameIndex >= 0 ? rows.slice(1).filter((row) => row[nameIndex]?.trim()).length : 0
+
+  const handleImport = async () => {
+    if (invalid || importCount === 0) {
+      setError('没有可导入的数据')
+      return
+    }
+    const index = (label: string) => header.findIndex((cell) => cell.includes(label))
+    const noIndex = index('编号')
+    const parentIndex = index('家长')
+    const phoneIndex = index('电话')
+    const boardingIndex = index('住宿')
+    const stamp = nowISO()
+    let count = 0
+    for (const row of rows.slice(1)) {
+      const name = row[nameIndex]?.trim()
+      if (!name) continue
+      await db.students.add({
+        classId,
+        name,
+        studentNo: noIndex >= 0 ? row[noIndex]?.trim() || undefined : undefined,
+        parentName: parentIndex >= 0 ? row[parentIndex]?.trim() || undefined : undefined,
+        parentPhone: phoneIndex >= 0 ? row[phoneIndex]?.trim() || undefined : undefined,
+        boarding: boardingIndex >= 0 ? row[boardingIndex]?.trim() || '走读' : '走读',
+        createdAt: stamp,
+        updatedAt: stamp,
+      })
+      count += 1
+    }
+    showToast(`已导入 ${count} 名学生`)
+    setText('')
+    setError(null)
+    onClose()
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="粘贴 CSV 导入学生"
+      footer={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button variant="primary" onClick={handleImport}>
+            导入
+          </Button>
+        </>
+      }
+    >
+      <p className="mb-3 text-xs leading-5 text-ink-500">
+        从 Excel 复制后直接粘贴。首行写列名，需包含「姓名」，支持：姓名、班内编号、家长姓名、家长电话、住宿类型。
+      </p>
+      <Textarea
+        value={text}
+        placeholder={'姓名,班内编号,家长姓名,家长电话,住宿类型\n张三,07,张先生,13800000000,走读'}
+        onChange={(event) => {
+          setText(event.target.value)
+          setError(null)
+        }}
+        className="min-h-[160px] font-mono text-xs"
+      />
+      {invalid && <p className="mt-2 text-xs text-danger-600">{invalid}</p>}
+      {!invalid && importCount > 0 && (
+        <p className="mt-2 text-xs text-ink-500">
+          将导入 <strong className="text-ink-900">{importCount}</strong> 名学生。
+        </p>
+      )}
+      {error && <p className="mt-2 text-xs text-danger-600">{error}</p>}
+    </Modal>
+  )
+}
+
+export function Students() {
+  const { currentClass } = useClassManager()
+  const { showToast } = useToast()
+  const [search, setSearch] = useState('')
+  const [phoneVisible, setPhoneVisible] = useState(false)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [editing, setEditing] = useState<Student | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [excelImportOpen, setExcelImportOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<Student | null>(null)
+  const [deleteInfo, setDeleteInfo] = useState('')
+
+  const classId = currentClass?.id
+  const students = useLiveQuery(
+    async () => {
+      if (classId == null) return []
+      const rows = await db.students.where('classId').equals(classId).toArray()
+      return rows.sort(
+        (a, b) => (a.studentNo ?? '').localeCompare(b.studentNo ?? '', 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN'),
+      )
+    },
+    [classId],
+    [] as Student[],
+  )!
+
+  const keyword = search.trim()
+  const filtered = students.filter(
+    (student) => student.name.includes(keyword) || (student.parentName ?? '').includes(keyword),
+  )
+
+  const openDelete = async (student: Student) => {
+    if (student.id == null) return
+    const [attendanceCount, leaveCount, commCount, scoreCount] = await Promise.all([
+      db.attendance.where('studentId').equals(student.id).count(),
+      db.leaves.where('studentId').equals(student.id).count(),
+      db.communications.where('studentId').equals(student.id).count(),
+      db.mathScores.where('studentId').equals(student.id).count(),
+    ])
+    const total = attendanceCount + leaveCount + commCount + scoreCount
+    setDeleteInfo(
+      total > 0
+        ? `该学生有 ${total} 条关联记录（出勤、请假、沟通、成绩），删除学生后这些记录保留，但不再关联到人。`
+        : '该学生暂无关联记录。',
+    )
+    setDeleteTarget(student)
+  }
+
+  const confirmDelete = async () => {
+    if (deleteTarget?.id == null) return
+    await db.students.delete(deleteTarget.id)
+    showToast('学生已删除')
+    setDeleteTarget(null)
+  }
+
+  const openNew = () => {
+    setEditing(null)
+    setDrawerOpen(true)
+  }
+
+  const openExcelImport = () => {
+    if (classId == null) {
+      showToast('请先在顶部选择班级')
+      return
+    }
+    setExcelImportOpen(true)
+  }
+
+  const exportCurrentClass = () => {
+    if (currentClass == null || classId == null) {
+      showToast('请先在顶部选择班级')
+      return
+    }
+    downloadStudentExport(currentClass.name, students)
+    showToast(`已导出「${currentClass.name}」${students.length} 名学生`)
+  }
+
+  return (
+    <Panel
+      title={`学生与家长 · ${currentClass?.name ?? ''}`}
+      subtitle={`${students.length} 名学生 · 电话默认部分隐藏，点「显示」后本次会话内可见 · 敏感备注不在列表展示 · Excel 仅在本机解析`}
+      actions={
+        <>
+          <Button onClick={openExcelImport} disabled={classId == null}>
+            <FileSpreadsheet size={14} /> Excel 导入
+          </Button>
+          <Button onClick={() => setImportOpen(true)} disabled={classId == null}>
+            <Upload size={14} /> 粘贴导入
+          </Button>
+          <Button onClick={exportCurrentClass} disabled={classId == null}>
+            <Download size={14} /> 导出当前班
+          </Button>
+          <Button onClick={downloadStudentTemplate}>
+            <FileDown size={14} /> 下载模板
+          </Button>
+          <Button onClick={downloadStudentExample40}>
+            <FileDown size={14} /> 40 人示例
+          </Button>
+          <Button variant="primary" onClick={openNew} disabled={classId == null}>
+            <Plus size={14} /> 新增学生
+          </Button>
+        </>
+      }
+      bodyClassName="p-0"
+    >
+      <div className="border-b border-line px-4 py-2.5">
+        <Input
+          value={search}
+          placeholder="搜索学生姓名或家长姓名"
+          aria-label="搜索学生"
+          className="max-w-[280px]"
+          onChange={(event) => setSearch(event.target.value)}
+        />
       </div>
 
       {filtered.length === 0 ? (
-        <Card><EmptyState icon={<Users size={40} />} title="暂无学生" description="点击右上角新增或导入学生名单" /></Card>
+        <div className="p-5">
+          <EmptyState
+            title={keyword ? '没有匹配的学生' : '当前班级暂无学生'}
+            hint={keyword ? '试试更换关键字，或清除搜索。' : '手动新增，或下载模板后使用 Excel 导入。'}
+            action={
+              keyword ? (
+                <Button onClick={() => setSearch('')}>清除搜索</Button>
+              ) : (
+                <Button variant="primary" onClick={openNew}>
+                  新增学生
+                </Button>
+              )
+            }
+          />
+        </div>
       ) : (
         <>
-          {/* 桌面表格 */}
-          <Card className="hidden md:block overflow-x-auto">
-            <table className="w-full text-sm">
+          <div className="hidden md:block">
+            <table className="w-full border-collapse text-sm">
               <thead>
-                <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
-                  {cols.map((c) => <th key={c.key} className="px-3 py-2.5 font-medium whitespace-nowrap">{c.label}</th>)}
-                  <th className="px-3 py-2.5 w-24">操作</th>
+                <tr className="border-b border-line text-left text-[11px] font-semibold text-ink-500">
+                  <th scope="col" className="px-4 py-2.5 font-semibold">编号</th>
+                  <th scope="col" className="px-4 py-2.5 font-semibold">姓名</th>
+                  <th scope="col" className="px-4 py-2.5 font-semibold">家长</th>
+                  <th scope="col" className="px-4 py-2.5 font-semibold">电话</th>
+                  <th scope="col" className="px-4 py-2.5 font-semibold">住宿</th>
+                  <th scope="col" className="px-4 py-2.5 text-right font-semibold">操作</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((s) => (
-                  <tr key={s.id} className="border-b border-gray-50 hover:bg-gray-50/50 cursor-pointer" onClick={() => { setEditing(s); setModalOpen(true) }}>
-                    {cols.map((c) => <td key={c.key} className="px-3 py-2.5 text-gray-700 truncate max-w-[180px]">{s[c.key] || '—'}</td>)}
-                    <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex gap-1">
-                        <button className="p-1.5 rounded hover:bg-gray-100 text-gray-500" onClick={() => { setEditing(s); setModalOpen(true) }}><Pencil size={15} /></button>
-                        <button className="p-1.5 rounded hover:bg-red-50 text-red-500" onClick={() => setDeleting(s)}><Trash2 size={15} /></button>
-                      </div>
+                {filtered.map((student) => (
+                  <tr key={student.id} className="border-b border-line last:border-b-0 hover:bg-[#FAFBFE]">
+                    <td className="px-4 py-2.5 tabular-nums text-ink-500">{student.studentNo ?? '—'}</td>
+                    <td className="px-4 py-2.5">
+                      <button
+                        type="button"
+                        className="font-semibold text-ink-900 hover:text-brand-600"
+                        onClick={() => {
+                          setEditing(student)
+                          setDrawerOpen(true)
+                        }}
+                      >
+                        {student.name}
+                      </button>
+                      <span className="ml-2 text-[11px] text-ink-500">{student.gender}</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-ink-700">{student.parentName ?? '—'}</td>
+                    <td className="px-4 py-2.5 tabular-nums text-ink-700">
+                      {student.parentPhone
+                        ? phoneVisible
+                          ? student.parentPhone
+                          : `${student.parentPhone.slice(0, 3)}****${student.parentPhone.slice(-2)}`
+                        : '—'}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <Badge variant={student.boarding === '住宿' ? 'blue' : 'default'}>{student.boarding ?? '走读'}</Badge>
+                    </td>
+                    <td className="px-4 py-2.5 text-right">
+                      <button
+                        type="button"
+                        onClick={() => setPhoneVisible((v) => !v)}
+                        aria-label={phoneVisible ? '隐藏电话' : '显示电话'}
+                        title={phoneVisible ? '隐藏电话' : '显示电话'}
+                        className="mr-1 inline-grid h-9 w-9 place-items-center rounded-menu text-ink-500 hover:bg-surface-muted hover:text-ink-900"
+                      >
+                        {phoneVisible ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`删除：${student.name}`}
+                        onClick={() => openDelete(student)}
+                        className="inline-grid h-9 w-9 place-items-center rounded-menu text-ink-500 hover:bg-danger-50 hover:text-danger-600"
+                      >
+                        <Trash2 size={15} />
+                      </button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </Card>
-
-          {/* 移动端卡片 */}
-          <div className="md:hidden space-y-2">
-            {filtered.map((s) => (
-              <Card key={s.id} className="p-3" onClick={() => { setEditing(s); setModalOpen(true) }}>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-9 h-9 rounded-full bg-brand-50 text-brand-700 flex items-center justify-center text-sm font-semibold">{s.name?.slice(0, 1)}</div>
-                    <div>
-                      <p className="text-sm font-medium text-gray-800">{s.name}</p>
-                      <p className="text-xs text-gray-400">{s.studentNo}{s.selection ? ` · ${s.selection}` : ''}</p>
-                    </div>
-                  </div>
-                  <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                    <button className="p-1.5 rounded hover:bg-gray-100 text-gray-500" onClick={() => { setEditing(s); setModalOpen(true) }}><Pencil size={15} /></button>
-                    <button className="p-1.5 rounded hover:bg-red-50 text-red-500" onClick={() => setDeleting(s)}><Trash2 size={15} /></button>
-                  </div>
-                </div>
-                {tab === 'roster' && (
-                  <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-gray-500">
-                    <span>家长：{s.parentName || '—'}</span>
-                    <span>电话：{s.parentPhone || '—'}</span>
-                  </div>
-                )}
-                {tab === 'records' && (
-                  <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-gray-500">
-                    <span>学籍号：{s.regNo || '—'}</span>
-                    <span>户籍：{s.hukou || '—'}</span>
-                  </div>
-                )}
-              </Card>
-            ))}
           </div>
+
+          <ul className="grid grid-cols-1 gap-2 p-4 md:hidden">
+            {filtered.map((student) => (
+              <li key={student.id} className="rounded-menu border border-line p-3">
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    className="text-sm font-bold text-ink-900"
+                    onClick={() => {
+                      setEditing(student)
+                      setDrawerOpen(true)
+                    }}
+                  >
+                    {student.name}
+                    <span className="ml-2 text-[11px] font-normal text-ink-500">{student.studentNo ?? ''}</span>
+                  </button>
+                  <Badge variant={student.boarding === '住宿' ? 'blue' : 'default'}>{student.boarding ?? '走读'}</Badge>
+                </div>
+                <p className="mt-1 text-xs text-ink-500">
+                  家长：{student.parentName ?? '—'} · {student.parentPhone ?? '—'}
+                </p>
+              </li>
+            ))}
+          </ul>
         </>
       )}
 
-      <StudentForm open={modalOpen} initial={editing} onClose={() => setModalOpen(false)} />
-      <ConfirmDialog open={!!deleting} title="删除学生" message={`确定删除 ${deleting?.name} 吗？相关成绩、沟通记录等也会失去关联。`} onCancel={() => setDeleting(null)} onConfirm={async () => { await db.table('students').delete(deleting.id); setDeleting(null) }} />
-    </div>
-  )
-}
+      <StudentFormDrawer
+        open={drawerOpen}
+        student={editing}
+        classId={editing?.classId ?? classId ?? 0}
+        onClose={() => {
+          setDrawerOpen(false)
+          setEditing(null)
+        }}
+      />
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} classId={classId ?? 0} />
+      <StudentExcelImportDialog
+        open={excelImportOpen}
+        classId={classId}
+        existingStudents={students}
+        onClose={() => setExcelImportOpen(false)}
+      />
 
-function StudentForm({ open, initial, onClose }: { open: boolean; initial: any; onClose: () => void }) {
-  const [form, setForm] = useState<any>(() => initial ? { ...initial } : { gender: '男', boardingType: '住校', classId: '高一（1）班' })
-  const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }))
-
-  const save = async () => {
-    if (!form.name?.trim() || !form.studentNo?.trim()) return alert('请填写姓名和学号')
-    const data = { ...form, name: form.name.trim(), studentNo: form.studentNo.trim() }
-    if (initial?.id) await db.table('students').update(initial.id, data)
-    else await db.table('students').add(data)
-    onClose()
-  }
-
-  return (
-    <Modal open={open} onClose={onClose} title={initial?.id ? '编辑学生' : '新增学生'} size="lg"
-      footer={<><Button variant="outline" onClick={onClose}>取消</Button><Button onClick={save}>保存</Button></>}>
-      <div className="space-y-4">
-        <section>
-          <h4 className="text-xs font-semibold text-gray-400 mb-2">基本信息</h4>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <Field label="姓名" required><Input value={form.name || ''} onChange={(e) => set('name', e.target.value)} /></Field>
-            <Field label="学号" required><Input value={form.studentNo || ''} onChange={(e) => set('studentNo', e.target.value)} /></Field>
-            <Field label="性别"><Select value={form.gender || ''} onChange={(e) => set('gender', e.target.value)}>{GENDERS.map((g) => <option key={g} value={g}>{g}</option>)}</Select></Field>
-            <Field label="班级"><Input value={form.classId || ''} onChange={(e) => set('classId', e.target.value)} /></Field>
-            <Field label="选科组合"><Input value={form.selection || ''} onChange={(e) => set('selection', e.target.value)} placeholder="如：物化生" list="selection-list" /><datalist id="selection-list">{['物化生', '物化地', '物生地', '史政地', '史政生'].map((s) => <option key={s} value={s} />)}</datalist></Field>
-            <Field label="生日"><Input type="date" value={form.birthday || ''} onChange={(e) => set('birthday', e.target.value)} /></Field>
-          </div>
-          <div className="mt-3"><Field label="备注"><Input value={form.remark || ''} onChange={(e) => set('remark', e.target.value)} /></Field></div>
-        </section>
-
-        <section>
-          <h4 className="text-xs font-semibold text-gray-400 mb-2">家庭信息（花名册）</h4>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <Field label="家长姓名"><Input value={form.parentName || ''} onChange={(e) => set('parentName', e.target.value)} /></Field>
-            <Field label="家长电话"><Input value={form.parentPhone || ''} onChange={(e) => set('parentPhone', e.target.value)} /></Field>
-            <Field label="紧急联系人"><Input value={form.emergencyContact || ''} onChange={(e) => set('emergencyContact', e.target.value)} /></Field>
-          </div>
-          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Field label="家庭住址"><Input value={form.address || ''} onChange={(e) => set('address', e.target.value)} /></Field>
-            <Field label="家庭情况">
-              <Select value={form.familySituation || ''} onChange={(e) => set('familySituation', e.target.value)}>
-                <option value="">无特殊</option>
-                {['单亲', '留守', '贫困', '父母离异', '亲子关系紧张'].map((c) => <option key={c} value={c}>{c}</option>)}
-              </Select>
-            </Field>
-          </div>
-        </section>
-
-        <section>
-          <h4 className="text-xs font-semibold text-gray-400 mb-2">学籍 / 健康 / 宿舍</h4>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <Field label="学籍号"><Input value={form.regNo || ''} onChange={(e) => set('regNo', e.target.value)} /></Field>
-            <Field label="身份证号"><Input value={form.idCard || ''} onChange={(e) => set('idCard', e.target.value)} /></Field>
-            <Field label="户籍"><Input value={form.hukou || ''} onChange={(e) => set('hukou', e.target.value)} /></Field>
-            <Field label="类型"><Select value={form.boardingType || ''} onChange={(e) => set('boardingType', e.target.value)}>{['住校', '走读'].map((b) => <option key={b} value={b}>{b}</option>)}</Select></Field>
-            <Field label="宿舍"><Input value={form.dorm || ''} onChange={(e) => set('dorm', e.target.value)} /></Field>
-            <Field label="接送方式"><Input value={form.pickup || ''} onChange={(e) => set('pickup', e.target.value)} /></Field>
-          </div>
-          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Field label="健康状况"><Input value={form.health || ''} onChange={(e) => set('health', e.target.value)} /></Field>
-            <Field label="过敏史 / 特殊疾病"><Input value={form.allergy || ''} onChange={(e) => set('allergy', e.target.value)} /></Field>
-          </div>
-        </section>
-      </div>
-    </Modal>
+      <Modal
+        open={deleteTarget != null}
+        onClose={() => setDeleteTarget(null)}
+        title="删除学生"
+        footer={
+          <>
+            <Button onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button variant="danger" onClick={confirmDelete}>
+              删除
+            </Button>
+          </>
+        }
+      >
+        确定删除「<strong className="text-ink-900">{deleteTarget?.name}</strong>」吗？{deleteInfo}
+      </Modal>
+    </Panel>
   )
 }

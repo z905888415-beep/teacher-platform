@@ -1,100 +1,317 @@
 import Dexie, { type Table } from 'dexie'
-import { DEFAULT_SUBJECT_FULL_MARKS } from '../lib/types'
 
-/**
- * 数据库表清单。所有实体统一存放在一个 IndexedDB 数据库中，
- * 通用实体用「字段驱动」的 CRUD 管理器读写（见 components/EntityManager.tsx），
- * 因此这里采用统一的 schema 定义，避免为每个实体重复样板代码。
- *
- * 索引约定：主键 ++id 自增；带下标的字段用于排序 / 检索。
- */
-const SCHEMA: Record<string, string> = {
-  // 主工作台
-  courses: '++id, dayOfWeek, period, weekType', // 课表
-  events: '++id, date, type', // 校历
-  todos: '++id, date, priority, done, category', // 待办
-  // 教学工作台
-  resources: '++id, category', // 备课资源
-  templates: '++id, category, subject', // 备课模板
-  teachingRecords: '++id, type, date', // 教学记录
-  students: '++id, studentNo, name, classId, selection', // 学生名单/花名册
-  exams: '++id, name, type, date', // 考试
-  scores: '++id, studentId, examId, subject', // 成绩
-  examSummaries: '++id, examId, studentId', // 每次考试的学生汇总（年级排名/赋分）
-  // 班主任工作台
-  communication: '++id, date, studentId', // 家校沟通
-  classSummaries: '++id, type, date', // 班级总结
-  cadres: '++id', // 班干部
-  seats: '++id, version', // 座位版本
-  duty: '++id, date', // 值日
-  rewards: '++id, studentId, date, type', // 奖惩
-  leaves: '++id, studentId, date', // 请假
-  concerns: '++id, studentId, type', // 关注事项
-  classMeetings: '++id, date', // 班会
-  classFund: '++id, date, type', // 班费
-  classLog: '++id, date, category', // 班级日志
-  attendance: '++id, studentId, date, type', // 考勤
-  dormitory: '++id, studentId', // 宿舍走读
-  morningEvening: '++id, week', // 早晚自习
-  safetyHealth: '++id, studentId', // 安全健康
-  parentMeetings: '++id, date', // 家长会
-  homeVisits: '++id, studentId, date', // 家访
-  familySituation: '++id, studentId, category', // 家庭情况
-  notifications: '++id, category', // 通知模板
-  // 学科协同
-  subjectTeachers: '++id, subject', // 学科教师通讯录
-  teachingProgress: '++id, subject', // 教学进度共享
-  homework: '++id, date, subject', // 作业与考试协调
-  meetings: '++id, date, type', // 学科协调会
-  // 成绩进阶 / 学生发展
-  goals: '++id, studentId', // 目标管理
-  career: '++id, studentId', // 生涯规划
-  psychology: '++id, studentId, date', // 心理状态
-  talks: '++id, studentId, date', // 谈心谈话
-  comprehensive: '++id, studentId, type', // 综合素质评价
-  borderline: '++id, studentId', // 临界生跟踪
-  // 行政事务
-  studentRecords: '++id, studentId', // 学籍信息
-  collegeEntrance: '++id, category', // 高考报名/体检
-  funding: '++id, type, date', // 贫困资助保险
-  countdowns: '++id, date, title', // 倒计时
-  // 常用工具
-  aiTools: '++id, category',
-  officeTools: '++id, category',
-  docTemplates: '++id, category',
-  fileTools: '++id, category',
-  // 设置
-  settings: 'key', // key-value
+/** 教学班 / 行政班 */
+export interface SchoolClass {
+  id?: number
+  name: string
+  grade?: string
+  isHomeroom: 0 | 1
+  archived: 0 | 1
+  createdAt: string
+  updatedAt: string
 }
 
-export const DB_NAME = 'teacher-platform'
-export const db = new Dexie(DB_NAME)
-db.version(1).stores(SCHEMA)
-
-/** 通用取表：用于字段驱动的 CRUD 管理器 */
-export function tbl(name: string): Table<any, number> {
-  return db.table(name)
+/** 学生与家长：仅保留日常联系所需最小字段 */
+export interface Student {
+  id?: number
+  classId: number
+  studentNo?: string
+  name: string
+  gender?: string
+  birthday?: string
+  parentName?: string
+  parentPhone?: string
+  emergencyContact?: string
+  boarding?: string
+  note?: string
+  createdAt: string
+  updatedAt: string
 }
 
-/** 读写单个设置项 */
-export async function getSetting<T = unknown>(key: string, fallback?: T): Promise<T | undefined> {
-  const row = await db.table('settings').get(key)
-  return row ? (row.value as T) : fallback
+/** 基础周课表 */
+export interface CourseTemplate {
+  id?: number
+  teachingClassId: number
+  subject: string
+  dayOfWeek: number
+  period: number
+  weekType: 'all' | 'odd' | 'even'
+  room?: string
+  note?: string
+  createdAt: string
+  updatedAt: string
 }
 
-export async function setSetting(key: string, value: unknown): Promise<void> {
-  await db.table('settings').put({ key, value })
+/** 临时调课记录；weekStart 为 '*' 表示长期调整的历史留痕 */
+export interface CourseAdjustment {
+  id?: number
+  courseId: number
+  weekStart: string
+  fromDayOfWeek: number
+  fromPeriod: number
+  toDayOfWeek: number
+  toPeriod: number
+  type: 'move' | 'swap' | 'cancel'
+  swappedCourseId?: number
+  note?: string
+  createdAt: string
 }
 
-/** 读取各科目满分（合并默认值，支持用户自定义） */
-export async function getSubjectFullMarks(): Promise<Record<string, number>> {
-  const saved = await getSetting<Record<string, number>>('subjectFullMarks')
-  return { ...DEFAULT_SUBJECT_FULL_MARKS, ...(saved || {}) }
+export type TodoCategory = '教学' | '班务' | '家校' | '个人'
+export type TodoPriority = 'low' | 'normal' | 'high'
+
+export interface Todo {
+  id?: number
+  title: string
+  dueAt?: string
+  priority: TodoPriority
+  category: TodoCategory
+  doneAt?: string
+  archivedAt?: string
+  relatedStudentId?: number
+  relatedEventId?: number
+  note?: string
+  createdAt: string
+  updatedAt: string
 }
 
-export async function setSubjectFullMarks(marks: Record<string, number>): Promise<void> {
-  await setSetting('subjectFullMarks', marks)
+export type EventType = '考试' | '放假' | '活动' | '会议' | '其他'
+
+export interface CalendarEvent {
+  id?: number
+  title: string
+  startAt: string
+  endAt?: string
+  type: EventType
+  note?: string
+  createdAt: string
+  updatedAt: string
 }
 
-// 复导出类型
-export type * from '../lib/types'
+export type AttendanceType = '迟到' | '早退' | '缺勤'
+
+/** 异常出勤：默认状态为“正常”，只写异常项 */
+export interface AttendanceRecord {
+  id?: number
+  studentId: number
+  date: string
+  type: AttendanceType
+  note?: string
+  createdAt: string
+}
+
+export interface LeaveRecord {
+  id?: number
+  studentId: number
+  startAt: string
+  endAt: string
+  type: '病假' | '事假' | '其他'
+  reason?: string
+  parentConfirmed: 0 | 1
+  createdAt: string
+}
+
+export interface Communication {
+  id?: number
+  studentId: number
+  date: string
+  method: string
+  summary: string
+  needFollowup: 0 | 1
+  followupDate?: string
+  followupTodoId?: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** P1：备课资料 */
+export interface Resource {
+  id?: number
+  title: string
+  type: '教案' | '课件' | '试题' | '微课' | '反思'
+  grade?: string
+  volume?: string
+  chapter?: string
+  link?: string
+  note?: string
+  /** 关联的课（F15） */
+  courseTemplateId?: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** P1：作业记录 */
+export interface Homework {
+  id?: number
+  classId: number
+  date: string
+  content: string
+  estimatedMinutes?: number
+  dueAt?: string
+  graded: 0 | 1
+  needReview: 0 | 1
+  createdAt: string
+  updatedAt: string
+}
+
+/** P1：数学考试与成绩 */
+export type ExamType = '随堂测验' | '单元测验' | '月考' | '期中' | '期末'
+
+export interface Exam {
+  id?: number
+  classId: number
+  name: string
+  type: ExamType
+  date: string
+  fullScore: number
+  createdAt: string
+}
+
+export interface MathScore {
+  id?: number
+  examId: number
+  studentId: number
+  score: number | null
+}
+
+/** P1：座位与值日 */
+export interface SeatVersion {
+  id?: number
+  classId: number
+  name: string
+  rows: number
+  cols: number
+  /** JSON：{ "r-c": studentId } */
+  seats: string
+  createdAt: string
+}
+
+export interface DutyAssignment {
+  id?: number
+  classId: number
+  groupName: string
+  members: string
+  weekday: number
+  task: string
+}
+
+/** P1：班级记录（时间线） */
+export type ClassRecordType = '班会' | '班级事件' | '表扬' | '纪律' | '卫生' | '活动'
+
+export interface ClassRecord {
+  id?: number
+  classId: number
+  date: string
+  type: ClassRecordType
+  content: string
+  studentIds: string
+  createdAt: string
+}
+
+/** P1：家长群通知模板 */
+export interface NotificationTemplate {
+  id?: number
+  title: string
+  content: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AppSetting {
+  key: string
+  value: string
+}
+
+export class WorkbenchDB extends Dexie {
+  classes!: Table<SchoolClass, number>
+  students!: Table<Student, number>
+  courseTemplates!: Table<CourseTemplate, number>
+  courseAdjustments!: Table<CourseAdjustment, number>
+  todos!: Table<Todo, number>
+  calendarEvents!: Table<CalendarEvent, number>
+  attendance!: Table<AttendanceRecord, number>
+  leaves!: Table<LeaveRecord, number>
+  communications!: Table<Communication, number>
+  resources!: Table<Resource, number>
+  homework!: Table<Homework, number>
+  exams!: Table<Exam, number>
+  mathScores!: Table<MathScore, number>
+  seatVersions!: Table<SeatVersion, number>
+  dutyAssignments!: Table<DutyAssignment, number>
+  classRecords!: Table<ClassRecord, number>
+  notificationTemplates!: Table<NotificationTemplate, number>
+  settings!: Table<AppSetting, string>
+
+  constructor() {
+    super('teacher-workbench')
+    this.version(1).stores({
+      classes: '++id, &name, archived, isHomeroom',
+      students: '++id, classId, name, studentNo',
+      courseTemplates: '++id, teachingClassId, dayOfWeek, period, subject',
+      courseAdjustments: '++id, courseId, weekStart',
+      todos: '++id, dueAt, category, doneAt',
+      calendarEvents: '++id, startAt, type',
+      attendance: '++id, studentId, date',
+      leaves: '++id, studentId, startAt, endAt',
+      communications: '++id, studentId, date, needFollowup',
+      resources: '++id, type',
+      homework: '++id, classId, date, graded',
+      exams: '++id, classId, date',
+      mathScores: '++id, examId, studentId',
+      seatVersions: '++id, classId',
+      dutyAssignments: '++id, classId, weekday',
+      classRecords: '++id, classId, date, type',
+      notificationTemplates: '++id, title',
+      settings: 'key',
+    })
+    this.version(2).stores({
+      classes: '++id, &name, archived, isHomeroom',
+      students: '++id, classId, name, studentNo',
+      courseTemplates: '++id, teachingClassId, dayOfWeek, period, subject',
+      courseAdjustments: '++id, courseId, weekStart',
+      todos: '++id, dueAt, category, doneAt',
+      calendarEvents: '++id, startAt, type',
+      attendance: '++id, studentId, date',
+      leaves: '++id, studentId, startAt, endAt',
+      communications: '++id, studentId, date, needFollowup',
+      resources: '++id, type, courseTemplateId',
+      homework: '++id, classId, date, graded',
+      exams: '++id, classId, date',
+      mathScores: '++id, examId, studentId',
+      seatVersions: '++id, classId',
+      dutyAssignments: '++id, classId, weekday',
+      classRecords: '++id, classId, date, type',
+      notificationTemplates: '++id, title',
+      settings: 'key',
+    })
+  }
+}
+
+export const db = new WorkbenchDB()
+
+export function nowISO(): string {
+  return new Date().toISOString()
+}
+
+/** 备份覆盖的全部业务表 */
+export const BACKUP_TABLES = [
+  'classes',
+  'students',
+  'courseTemplates',
+  'courseAdjustments',
+  'todos',
+  'calendarEvents',
+  'attendance',
+  'leaves',
+  'communications',
+  'resources',
+  'homework',
+  'exams',
+  'mathScores',
+  'seatVersions',
+  'dutyAssignments',
+  'classRecords',
+  'notificationTemplates',
+] as const
+
+export type BackupTableName = (typeof BACKUP_TABLES)[number]

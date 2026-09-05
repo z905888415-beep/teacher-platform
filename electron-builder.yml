@@ -1,0 +1,26 @@
+appId: com.teacherworkbench.desktop
+productName: 初中数学班主任工作台
+asar: true
+npmRebuild: false
+electronDist: node_modules/electron/dist
+directories:
+  output: release
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+  - "!node_modules/**/*"
+win:
+  icon: build/icon.png
+  signtoolOptions:
+    certificateSubjectName: 初中数学班主任工作台 自用签名
+    signingHashAlgorithms:
+      - sha256
+    rfc3161TimeStampServer: http://timestamp.digicert.com
+  target:
+    - target: portable
+      arch:
+        - x64
+  artifactName: "${productName}-${version}-Windows-${arch}.${ext}"
+portable:
+  requestExecutionLevel: user

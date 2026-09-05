@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>重置工作台数据</title>
+  </head>
+  <body>
+    <p>正在清空本机数据并重新加载示例…</p>
+    <script>
+      const req = indexedDB.deleteDatabase('teacher-workbench')
+      const go = () => {
+        location.replace('/#/')
+      }
+      req.onsuccess = go
+      req.onerror = go
+      req.onblocked = () => setTimeout(go, 800)
+      setTimeout(go, 1500)
+    </script>
+  </body>
+</html>

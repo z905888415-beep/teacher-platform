@@ -1,226 +1,199 @@
 import { useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { ChevronLeft, ChevronRight, Plus, RotateCcw, Trash2 } from 'lucide-react'
+import { Printer } from 'lucide-react'
 import { db } from '../db'
-import { Card, Button, Modal, Input, Select, Field, PageHeader } from '../components/ui'
-import { isEvenWeek, mondayOf, fmtDate } from '../lib/utils'
-import { SUBJECTS, WEEKDAYS } from '../lib/types'
-import type { Course } from '../lib/types'
+import {
+  addDays,
+  currentPeriod,
+  minutesOf,
+  mondayOf,
+  periodRange,
+  teachingWeek,
+  todayISO,
+  weekParityLabel,
+  parsePeriodTimes,
+  WEEKDAY_NAMES,
+  parseISODate,
+} from '../lib/dates'
+import { computeWeekSchedule } from '../lib/timetable'
+import { useSetting, setSetting } from '../hooks/useSetting'
+import { useClassManager } from '../contexts/ClassContext'
+import { WeekGrid, MobileCourseList } from '../components/timetable/WeekGrid'
+import { Button, Panel } from '../components/ui'
 
-const PERIODS = [1, 2, 3, 4, 5, 6, 7, 8]
-const DAYS = [1, 2, 3, 4, 5, 6, 7]
-
-const SUBJECT_COLORS: Record<string, string> = {
-  语文: '#f59e0b', 数学: '#2563eb', 英语: '#16a34a', 物理: '#8b5cf6', 化学: '#06b6d4',
-  生物: '#10b981', 政治: '#ef4444', 历史: '#f97316', 地理: '#14b8a6', 体育: '#64748b',
-  班会: '#ec4899', 信息技术: '#3b82f6', 美术: '#a855f7', 音乐: '#f472b6',
-}
-
-function subjectColor(subject: string): string {
-  if (SUBJECT_COLORS[subject]) return SUBJECT_COLORS[subject]
-  let h = 0
-  for (const ch of subject) h = (h * 31 + ch.charCodeAt(0)) % 360
-  return `hsl(${h}, 65%, 45%)`
-}
-
-export default function Timetable() {
-  const courses = useLiveQuery(() => db.table('courses').toArray(), []) ?? ([] as Course[])
+export function Timetable() {
+  const { currentClass } = useClassManager()
   const [weekOffset, setWeekOffset] = useState(0)
-  const [weekFilter, setWeekFilter] = useState<'auto' | 'all' | 'odd' | 'even'>('auto')
-  const [editing, setEditing] = useState<Course | null>(null)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [deleting, setDeleting] = useState<Course | null>(null)
 
-  const monday = mondayOf()
-  monday.setDate(monday.getDate() + weekOffset * 7)
-  const even = isEvenWeek(weekOffset)
+  const semesterStart = useSetting('semesterStart', `${new Date().getFullYear()}-08-31`)
+  const periodCount = Number(useSetting('periodCount', '6')) || 6
+  const showWeekend = useSetting('showWeekend', '0') === '1'
+  const periodTimesRaw = useSetting('periodTimes', '')
+  const periodTimes = useMemo(() => parsePeriodTimes(periodTimesRaw, periodCount), [periodTimesRaw, periodCount])
 
-  const weekLabel = () => {
-    const d = new Date(monday)
-    return `${fmtDate(d)} 起${weekFilter === 'all' ? '' : weekFilter === 'odd' ? '（只看单周）' : weekFilter === 'even' ? '（只看双周）' : even ? '（双周）' : '（单周）'}`
-  }
+  const templates = useLiveQuery(() => db.courseTemplates.toArray(), [], [])!
+  const adjustments = useLiveQuery(() => db.courseAdjustments.toArray(), [], [])!
+  const classes = useLiveQuery(() => db.classes.toArray(), [], [])!
 
-  const visibleCourses = useMemo(() => {
-    return courses.filter((c) => {
-      if (weekFilter === 'all') return true
-      if (weekFilter === 'odd') return c.weekType === 'all' || c.weekType === 'odd'
-      if (weekFilter === 'even') return c.weekType === 'all' || c.weekType === 'even'
-      return c.weekType === 'all' || (c.weekType === 'even' ? even : !even)
-    })
-  }, [courses, weekFilter, even])
+  const today = todayISO()
+  const weekStart = addDays(mondayOf(today), weekOffset * 7)
+  const weekNo = teachingWeek(weekStart, semesterStart)
+  const weekEnd = addDays(weekStart, 4)
+  const now = new Date()
+  const nowMinutes = now.getHours() * 60 + now.getMinutes()
+  const currentSlot = weekOffset === 0
+    ? (() => {
+        const period = currentPeriod(periodTimes, now)
+        const day = now.getDay()
+        return period && day >= 1 && day <= 5 ? { day, period } : null
+      })()
+    : null
+  // F23：下一节“即将开始”
+  const nextSlot = weekOffset === 0
+    ? (() => {
+        const day = now.getDay()
+        if (day < 1 || day > 5) return null
+        for (let period = 1; period <= periodCount; period += 1) {
+          const range = periodRange(periodTimes, period)
+          if (range && minutesOf(range.start) > nowMinutes) return { day, period }
+        }
+        return null
+      })()
+    : null
 
-  const cell = (day: number, period: number): Course[] =>
-    visibleCourses.filter((c) => c.dayOfWeek === day && c.period === period)
+  const schedule = useMemo(
+    () => computeWeekSchedule(templates, adjustments, classes, weekStart, weekNo, currentSlot, nextSlot),
+    [templates, adjustments, classes, weekStart, weekNo, currentSlot, nextSlot],
+  )
 
-  const openAdd = (day: number, period: number) => {
-    setEditing({ dayOfWeek: day, period, subject: '', weekType: 'all' })
-    setModalOpen(true)
-  }
-
-  const save = async (data: Course) => {
-    if (data.id) await db.table('courses').update(data.id, data)
-    else await db.table('courses').add(data)
-    setModalOpen(false)
-    setEditing(null)
-  }
-
-  const remove = async () => {
-    if (deleting?.id) await db.table('courses').delete(deleting.id)
-    setDeleting(null)
-  }
+  const todayDay = now.getDay()
+  const mobileDay = todayDay >= 1 && todayDay <= 5 ? todayDay : 1
+  const rangeLabel = `${weekStart.slice(5).replace('-', '/')} – ${weekEnd.slice(5).replace('-', '/')}`
+  const editMode = useSetting('timetableEditMode', '1') === '1'
 
   return (
-    <div>
-      <PageHeader
+    <>
+      <Panel
         title="我的课表"
-        subtitle={weekLabel()}
+        subtitle={`第 ${weekNo} 周（${weekParityLabel(weekNo)}）· ${rangeLabel} · 当前管理：${currentClass?.name ?? ''}`}
         actions={
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1">
-              <Button variant="outline" size="sm" onClick={() => setWeekOffset(weekOffset - 1)}><ChevronLeft size={15} /></Button>
-              <Button variant="outline" size="sm" onClick={() => setWeekOffset(0)}><RotateCcw size={14} />本周</Button>
-              <Button variant="outline" size="sm" onClick={() => setWeekOffset(weekOffset + 1)}><ChevronRight size={15} /></Button>
+            <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-700">
+              <input
+                type="checkbox"
+                checked={editMode}
+                onChange={(event) => setSetting('timetableEditMode', event.target.checked ? '1' : '0')}
+                className="h-4 w-4 accent-[#002FA7]"
+              />
+              编辑模式
+            </label>
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="inline-flex h-9 items-center gap-1 rounded-ui border border-line px-3 text-xs font-semibold text-ink-700 hover:border-line-strong"
+            >
+              <Printer size={14} /> 打印
+            </button>
+            <div className="flex items-center gap-1" role="group" aria-label="课表周次切换">
+            <button
+              type="button"
+              onClick={() => setWeekOffset((v) => v - 1)}
+              className="rounded-full px-2.5 py-1.5 text-[11px] text-ink-700 hover:bg-surface-muted"
+            >
+              上一周
+            </button>
+            <button
+              type="button"
+              onClick={() => setWeekOffset(0)}
+              className={`rounded-full px-2.5 py-1.5 text-[11px] font-semibold ${
+                weekOffset === 0 ? 'bg-brand-600 text-white' : 'text-ink-700 hover:bg-surface-muted'
+              }`}
+            >
+              本周
+            </button>
+            <button
+              type="button"
+              onClick={() => setWeekOffset((v) => v + 1)}
+              className="rounded-full px-2.5 py-1.5 text-[11px] text-ink-700 hover:bg-surface-muted"
+            >
+              下一周
+            </button>
             </div>
-            <Select value={weekFilter} onChange={(e) => setWeekFilter(e.target.value as any)} className="w-auto">
-              <option value="auto">跟随周次</option>
-              <option value="all">全部</option>
-              <option value="odd">只看单周</option>
-              <option value="even">只看双周</option>
-            </Select>
           </div>
         }
-      />
-
-      <Card className="overflow-x-auto">
-        <table className="w-full border-collapse" style={{ minWidth: 760 }}>
-          <thead>
-            <tr>
-              <th className="p-2 text-xs text-gray-400 font-medium w-12">节次</th>
-              {DAYS.map((d) => (
-                <th key={d} className={`p-2 text-xs font-medium ${d >= 6 ? 'text-gray-400' : 'text-gray-600'}`}>{WEEKDAYS[d - 1]}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {PERIODS.map((p) => (
-              <tr key={p}>
-                <td className="p-1.5 text-center text-xs text-gray-400 border-t border-gray-100 align-top">
-                  <div className="mt-1">{p}</div>
-                </td>
-                {DAYS.map((d) => {
-                  const list = cell(d, p)
-                  return (
-                    <td key={d} className="p-1 border-t border-l border-gray-100 align-top" style={{ height: 72 }}>
-                      <div className="flex flex-col gap-1">
-                        {list.map((c) => (
-                          <button
-                            key={c.id}
-                            onClick={() => { setEditing(c); setModalOpen(true) }}
-                            className="text-left p-1.5 rounded-md text-xs leading-tight transition-transform hover:scale-[1.02]"
-                            style={{ backgroundColor: subjectColor(c.subject) + '1a', color: subjectColor(c.subject) }}
-                          >
-                            <span className="font-medium">{c.subject}</span>
-                            {c.weekType !== 'all' && <span className="ml-1 text-[10px] opacity-70">{c.weekType === 'odd' ? '单' : '双'}</span>}
-                            {c.note && <span className="block text-[10px] opacity-70">📌{c.note}</span>}
-                          </button>
-                        ))}
-                        <button
-                          onClick={() => openAdd(d, p)}
-                          className="p-1.5 rounded-md text-xs text-gray-300 hover:text-brand-500 hover:bg-brand-50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                          style={{ opacity: list.length ? undefined : 0 }}
-                        >
-                          <Plus size={12} className="hidden sm:block" />
-                        </button>
-                      </div>
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Card>
-
-      <p className="mt-3 text-xs text-gray-400">💡 点击课程可编辑；点击空白格（桌面端）可添加课程。支持单双周与调课备注。</p>
-
-      <CourseModal
-        key={editing ? `${editing.dayOfWeek}-${editing.period}-${editing.id ?? 'new'}` : 'closed'}
-        open={modalOpen}
-        initial={editing}
-        onClose={() => { setModalOpen(false); setEditing(null) }}
-        onSave={save}
-        onDelete={editing?.id ? () => setDeleting(editing) : undefined}
-      />
-
-      <Modal open={!!deleting} onClose={() => setDeleting(null)} title="删除课程" size="sm"
-        footer={<><Button variant="outline" onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" onClick={remove}>删除</Button></>}>
-        <p className="text-sm text-gray-600">确定删除 {deleting?.subject}（第{deleting?.period}节）？</p>
-      </Modal>
-    </div>
-  )
-}
-
-function CourseModal({ open, initial, onClose, onSave, onDelete }: {
-  open: boolean
-  initial: Course | null
-  onClose: () => void
-  onSave: (c: Course) => void
-  onDelete?: () => void
-}) {
-  const [data, setData] = useState<Course>(() => ({
-    dayOfWeek: initial?.dayOfWeek || 1,
-    period: initial?.period || 1,
-    subject: initial?.subject || '',
-    teacher: initial?.teacher || '',
-    weekType: initial?.weekType || 'all',
-    note: initial?.note || '',
-    id: initial?.id,
-  }))
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title={`${initial?.id ? '编辑' : '添加'}课程 · ${WEEKDAYS[data.dayOfWeek - 1]} 第${data.period}节`}
-      footer={
-        <>
-          {onDelete && <Button variant="danger" className="mr-auto" onClick={onDelete}><Trash2 size={15} />删除</Button>}
-          <Button variant="outline" onClick={onClose}>取消</Button>
-          <Button onClick={() => onSave(data)}>保存</Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <Field label="科目" required>
-          <Input list="subject-list" value={data.subject} onChange={(e) => setData({ ...data, subject: e.target.value })} placeholder="如：数学" />
-          <datalist id="subject-list">{SUBJECTS.map((s) => <option key={s} value={s} />)}</datalist>
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="星期">
-            <Select value={data.dayOfWeek} onChange={(e) => setData({ ...data, dayOfWeek: Number(e.target.value) })}>
-              {DAYS.map((d) => <option key={d} value={d}>{WEEKDAYS[d - 1]}</option>)}
-            </Select>
-          </Field>
-          <Field label="节次">
-            <Select value={data.period} onChange={(e) => setData({ ...data, period: Number(e.target.value) })}>
-              {PERIODS.map((p) => <option key={p} value={p}>第{p}节</option>)}
-            </Select>
-          </Field>
-          <Field label="单双周">
-            <Select value={data.weekType} onChange={(e) => setData({ ...data, weekType: e.target.value as any })}>
-              <option value="all">每周</option>
-              <option value="odd">单周</option>
-              <option value="even">双周</option>
-            </Select>
-          </Field>
-          <Field label="任课教师">
-            <Input value={data.teacher || ''} onChange={(e) => setData({ ...data, teacher: e.target.value })} />
-          </Field>
+        bodyClassName="p-2.5 sm:p-3"
+      >
+        <div className="hidden md:block">
+          <WeekGrid
+            weekStart={weekStart}
+            weekNo={weekNo}
+            schedule={schedule}
+            days={showWeekend ? [1, 2, 3, 4, 5, 6, 0].filter((d) => (showWeekend ? true : d <= 5)) : [1, 2, 3, 4, 5]}
+            periodCount={periodCount}
+            todayISODate={today}
+            nextSlot={nextSlot}
+            interactive={editMode}
+          />
         </div>
-        <Field label="调课备注">
-          <Input value={data.note || ''} onChange={(e) => setData({ ...data, note: e.target.value })} placeholder="如：与周三第3节对调" />
-        </Field>
+        <MobileCourseList schedule={schedule} day={mobileDay} periodCount={periodCount} weekStart={weekStart} />
+      </Panel>
+
+      <div className="mt-3.5 grid grid-cols-1 gap-3.5 min-[768px]:grid-cols-2">
+        <Panel title="今日课程" bodyClassName="px-4 pb-4">
+          <ul>
+            {Array.from({ length: periodCount }, (_, i) => i + 1)
+              .flatMap((period) =>
+                (schedule.slots.get(`${mobileDay}-${period}`) ?? []).map((course) => ({ course, period })),
+              )
+              .map(({ course, period }) => (
+                <li key={course.templateId} className="flex items-center gap-3 border-t border-line py-2 first:border-t-0">
+                  <span className="w-8 text-xs tabular-nums text-ink-500">第 {period} 节</span>
+                  <span className="flex-1 text-sm font-semibold text-ink-900">{course.subject}</span>
+                  <span className="text-[11px] text-ink-500">
+                    {course.className}
+                    {course.room ? ` · ${course.room}` : ''}
+                  </span>
+                </li>
+              ))}
+            {Array.from({ length: periodCount }, (_, i) => i + 1).every(
+              (period) => (schedule.slots.get(`${mobileDay}-${period}`) ?? []).length === 0,
+            ) && <li className="py-3 text-xs text-ink-500">今天暂无课程</li>}
+          </ul>
+        </Panel>
+        <Panel title="本周概览" bodyClassName="px-4 pb-4">
+          <div className="grid grid-cols-5 gap-2 pt-1">
+            {[1, 2, 3, 4, 5].map((day) => {
+              const count = Array.from({ length: periodCount }, (_, i) => i + 1).reduce(
+                (sum, period) => sum + (schedule.slots.get(`${day}-${period}`)?.length ?? 0),
+                0,
+              )
+              const iso = addDays(weekStart, day - 1)
+              return (
+                <div key={day} className="rounded-menu border border-line px-2 py-3 text-center">
+                  <p className={`text-[11px] ${iso === today ? 'font-bold text-brand-600' : 'text-ink-500'}`}>
+                    {WEEKDAY_NAMES[parseISODate(iso).getDay()]}
+                  </p>
+                  <p className={`mt-1 text-lg font-bold tabular-nums ${count === 0 ? 'text-ink-500' : 'text-ink-900'}`}>
+                    {count}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+          <p className="mt-3 text-[11px] leading-5 text-ink-500">
+            拖动课程卡调整位置；单击课程编辑内容；点击「移」或按 M 键进入移动模式后，点击目标格即可键盘完成调课。
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              onClick={() => {
+                setSetting('showWeekend', showWeekend ? '0' : '1')
+              }}
+            >
+              {showWeekend ? '隐藏周末' : '显示周末'}
+            </Button>
+          </div>
+        </Panel>
       </div>
-    </Modal>
+    </>
   )
 }

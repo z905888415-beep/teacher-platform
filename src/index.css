@@ -2,55 +2,99 @@
 @tailwind components;
 @tailwind utilities;
 
-html {
-  -webkit-tap-highlight-color: transparent;
-}
-
-body {
-  @apply bg-gray-50 text-gray-900 antialiased;
-  font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-}
-
-/* 移动端输入框缩放问题 */
-input, select, textarea {
-  font-size: 16px;
-}
-
-/* 细滚动条 */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-thumb {
-  @apply bg-gray-300 rounded-full;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-/* 打印友好：仅打印主内容，隐藏导航 */
-@media print {
-  aside, header, nav, .no-print {
-    display: none !important;
-  }
-  main {
-    padding-left: 0 !important;
-    padding-bottom: 0 !important;
+@layer base {
+  html {
+    color-scheme: light;
   }
   body {
-    background: white !important;
+    @apply bg-canvas font-sans text-sm text-ink-700 antialiased;
+    font-variant-numeric: tabular-nums;
   }
-  .print-break {
-    page-break-before: always;
+  button {
+    cursor: pointer;
+  }
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid #002fa7;
+    outline-offset: 2px;
+  }
+  /* 数字使用等宽排版，便于扫读（UI 规范 2.4） */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
   }
 }
 
-/* 隐藏数字输入框的上下箭头（更整洁） */
-input[type='number']::-webkit-outer-spin-button,
-input[type='number']::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
+/* 内容块依次进入（UI 规范 1.3：50–60ms 间隔，下方 18px 淡入归位） */
+@keyframes block-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
-input[type='number'] {
-  -moz-appearance: textfield;
+
+@keyframes drawer-in {
+  from {
+    opacity: 0.6;
+    transform: translateX(28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* 打印：只保留内容块，黑白输出（UI 规范 18.4） */
+@media print {
+  aside,
+  header,
+  nav,
+  .print\:hidden {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+  main {
+    padding: 0 !important;
+    max-width: 100% !important;
+  }
+  section {
+    box-shadow: none !important;
+    border-color: #999 !important;
+  }
+  .course,
+  [style*='background'] {
+    background: #fff !important;
+    color: #000 !important;
+    border-color: #000 !important;
+  }
 }

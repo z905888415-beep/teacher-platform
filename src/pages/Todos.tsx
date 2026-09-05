@@ -1,147 +1,215 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { Plus, Trash2, Pencil, CheckCircle2, Circle } from 'lucide-react'
-import { db } from '../db'
-import { Card, Button, Modal, Input, Select, Field, PageHeader, Badge, EmptyState, SearchInput } from '../components/ui'
-import { cn, todayStr } from '../lib/utils'
+import { Plus, Trash2 } from 'lucide-react'
+import { db, nowISO, type Todo, type TodoCategory } from '../db'
+import { addDays, todayISO } from '../lib/dates'
+import { setTodoDone } from '../services/todos'
+import { Badge, Button, EmptyState, Panel } from '../components/ui'
+import { TodoDrawer } from '../components/todos/TodoDrawer'
+import { useToast } from '../contexts/ToastContext'
 
-export default function Todos() {
-  const todos = useLiveQuery(() => db.table('todos').toArray(), []) ?? []
-  const [filter, setFilter] = useState<'all' | 'active' | 'done'>('active')
-  const [query, setQuery] = useState('')
-  const [editing, setEditing] = useState<any | null>(null)
-  const [modalOpen, setModalOpen] = useState(false)
+type TabKey = 'all' | 'today' | 'week' | 'done'
+const TABS: [TabKey, string][] = [
+  ['all', '全部'],
+  ['today', '今天'],
+  ['week', '本周'],
+  ['done', '已完成'],
+]
+const CATEGORIES: (TodoCategory | '全部')[] = ['全部', '教学', '班务', '家校', '个人']
 
-  const today = todayStr()
+export function Todos() {
+  const { showToast } = useToast()
+  const [tab, setTab] = useState<TabKey>('all')
+  const [category, setCategory] = useState<(typeof CATEGORIES)[number]>('全部')
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [editing, setEditing] = useState<Todo | null>(null)
+  const [selected, setSelected] = useState<number[]>([])
 
-  const toggle = async (t: any) => {
-    await db.table('todos').update(t.id, { done: !t.done })
-  }
+  const todos = useLiveQuery(() => db.todos.orderBy('dueAt').toArray(), [], [])!
 
-  const remove = async (id: number) => {
-    await db.table('todos').delete(id)
-  }
+  // F17：已完成超过 30 天的待办自动归档（保留数据，默认不展示）
+  useEffect(() => {
+    const stale = todos.filter(
+      (todo) =>
+        todo.doneAt &&
+        !todo.archivedAt &&
+        Date.now() - new Date(todo.doneAt).getTime() > 30 * 24 * 3600 * 1000,
+    )
+    if (stale.length === 0) return
+    const stamp = nowISO()
+    void db.todos.bulkUpdate(stale.map((todo) => ({ key: todo.id!, changes: { archivedAt: stamp } })))
+  }, [todos])
+
+  const today = todayISO()
+  const weekEnd = addDays(today, 7)
 
   const filtered = useMemo(() => {
-    let list = todos
-    if (filter === 'active') list = list.filter((t) => !t.done)
-    if (filter === 'done') list = list.filter((t) => t.done)
-    if (query.trim()) list = list.filter((t) => (t.title || '').toLowerCase().includes(query.trim().toLowerCase()))
-    return list
-  }, [todos, filter, query])
-
-  const groups = useMemo(() => {
-    const overdue = filtered.filter((t) => !t.done && t.date && t.date < today)
-    const todayItems = filtered.filter((t) => !t.done && t.date === today)
-    const future = filtered.filter((t) => !t.done && (!t.date || t.date > today))
-    const done = filtered.filter((t) => t.done)
-    const sortBy = (a: any, b: any) => {
-      const pa = a.priority === '高' ? 0 : a.priority === '中' ? 1 : 2
-      const pb = b.priority === '高' ? 0 : b.priority === '中' ? 1 : 2
-      return pa - pb || (a.date || '9999').localeCompare(b.date || '9999')
+    let rows = todos.filter((t) => !t.archivedAt)
+    if (category !== '全部') rows = rows.filter((t) => t.category === category)
+    if (tab === 'done') rows = rows.filter((t) => t.doneAt)
+    else if (tab === 'all') {
+      // F29：「全部」包含未完成 + 已完成
+    } else {
+      rows = rows.filter((t) => !t.doneAt)
+      if (tab === 'today') rows = rows.filter((t) => t.dueAt && t.dueAt <= today)
+      if (tab === 'week') rows = rows.filter((t) => t.dueAt && t.dueAt <= weekEnd)
     }
-    return [
-      { label: '已逾期', color: 'text-red-600', items: overdue.sort(sortBy) },
-      { label: '今天', color: 'text-brand-600', items: todayItems.sort(sortBy) },
-      { label: '待办', color: 'text-gray-600', items: future.sort(sortBy) },
-      { label: '已完成', color: 'text-emerald-600', items: done },
-    ]
-  }, [filtered, today])
+    return rows
+  }, [todos, tab, category, today, weekEnd])
 
-  const openAdd = () => { setEditing(null); setModalOpen(true) }
+  const toggleDone = async (todo: Todo, done: boolean) => {
+    if (todo.id == null) return
+    await setTodoDone(todo.id, done)
+    if (done) showToast('待办已完成')
+  }
+
+  const removeTodo = async (todo: Todo) => {
+    if (todo.id == null) return
+    await db.todos.delete(todo.id)
+    showToast('待办已删除')
+  }
+
+  const batchDone = async () => {
+    for (const id of selected) {
+      await setTodoDone(id, true)
+    }
+    showToast(`已完成 ${selected.length} 条待办`)
+    setSelected([])
+  }
+
+  const batchDelete = async () => {
+    await db.todos.bulkDelete(selected)
+    showToast(`已删除 ${selected.length} 条待办`)
+    setSelected([])
+  }
 
   return (
-    <div>
-      <PageHeader
-        title="待办事项"
-        subtitle={`共 ${todos.filter((t) => !t.done).length} 项待办`}
-        actions={<Button size="sm" onClick={openAdd}><Plus size={15} />添加待办</Button>}
-      />
-
-      <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-4">
-        <SearchInput value={query} onChange={setQuery} placeholder="搜索待办…" />
-        <div className="flex gap-1">
-          {([['active', '未完成'], ['done', '已完成'], ['all', '全部']] as const).map(([k, label]) => (
+    <Panel
+      title="待办"
+      actions={
+        <Button variant="primary" onClick={() => { setEditing(null); setDrawerOpen(true) }}>
+          <Plus size={14} /> 新增待办
+        </Button>
+      }
+      bodyClassName="p-0"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+        <div className="flex gap-1" role="tablist" aria-label="待办范围">
+          {TABS.map(([key, label]) => (
             <button
-              key={k}
-              onClick={() => setFilter(k)}
-              className={cn('px-3 py-1.5 text-sm rounded-lg', filter === k ? 'bg-brand-600 text-white' : 'bg-white text-gray-600 border border-gray-200')}
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={tab === key}
+              onClick={() => setTab(key)}
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
+                tab === key ? 'bg-brand-600 text-white' : 'text-ink-700 hover:bg-surface-muted'
+              }`}
             >
               {label}
             </button>
           ))}
         </div>
+        <div className="flex flex-wrap gap-1.5">
+          {CATEGORIES.map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => setCategory(item)}
+              className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                category === item ? 'border-brand-600 bg-brand-50 text-brand-600' : 'border-line text-ink-500 hover:border-line-strong'
+              }`}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {filtered.length === 0 ? (
-        <Card><EmptyState title="暂无待办" description="点击右上角添加待办事项" /></Card>
-      ) : (
-        <div className="space-y-4">
-          {groups.map((g) => g.items.length > 0 && (
-            <div key={g.label}>
-              <h3 className={cn('text-xs font-semibold mb-2', g.color)}>{g.label} · {g.items.length}</h3>
-              <div className="space-y-2">
-                {g.items.map((t) => (
-                  <Card key={t.id} className={cn('p-3 flex items-center gap-3', t.done && 'opacity-60')}>
-                    <button onClick={() => toggle(t)} className="shrink-0 text-gray-300 hover:text-brand-500">
-                      {t.done ? <CheckCircle2 size={22} className="text-emerald-500" /> : <Circle size={22} />}
-                    </button>
-                    <div className="flex-1 min-w-0">
-                      <p className={cn('text-sm text-gray-800', t.done && 'line-through')}>{t.title}</p>
-                      <p className="text-xs text-gray-400 mt-0.5">
-                        {t.date || '未设日期'}{t.category ? ` · ${t.category}` : ''}
-                      </p>
-                    </div>
-                    {t.priority && <Badge color={t.priority === '高' ? 'red' : t.priority === '中' ? 'amber' : 'gray'}>{t.priority}</Badge>}
-                    <button className="p-1.5 rounded hover:bg-gray-100 text-gray-400" onClick={() => { setEditing(t); setModalOpen(true) }}><Pencil size={15} /></button>
-                    <button className="p-1.5 rounded hover:bg-red-50 text-red-400" onClick={() => remove(t.id)}><Trash2 size={15} /></button>
-                  </Card>
-                ))}
-              </div>
-            </div>
-          ))}
+      {selected.length > 0 && (
+        <div className="flex items-center justify-between gap-2 border-b border-line bg-brand-50 px-4 py-2">
+          <span className="text-xs font-semibold text-brand-600">已选 {selected.length} 条</span>
+          <span className="flex gap-2">
+            <Button onClick={batchDone}>批量完成</Button>
+            <Button variant="dangerSoft" onClick={batchDelete}>
+              批量删除
+            </Button>
+          </span>
         </div>
       )}
 
-      <TodoModal open={modalOpen} initial={editing} onClose={() => setModalOpen(false)} />
-    </div>
-  )
-}
-
-function TodoModal({ open, initial, onClose }: { open: boolean; initial: any; onClose: () => void }) {
-  const [form, setForm] = useState(() => ({
-    title: initial?.title || '',
-    date: initial?.date || '',
-    priority: initial?.priority || '中',
-    category: initial?.category || '教学',
-  }))
-
-  const save = async () => {
-    if (!form.title.trim()) return
-    if (initial?.id) await db.table('todos').update(initial.id, form)
-    else await db.table('todos').add({ ...form, done: false })
-    onClose()
-  }
-
-  return (
-    <Modal open={open} onClose={onClose} title={initial?.id ? '编辑待办' : '添加待办'}
-      footer={<><Button variant="outline" onClick={onClose}>取消</Button><Button onClick={save}>保存</Button></>}>
-      <div className="space-y-3">
-        <Field label="标题" required><Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="要做什么？" autoFocus /></Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="日期"><Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-          <Field label="优先级">
-            <Select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
-              {['高', '中', '低'].map((p) => <option key={p} value={p}>{p}</option>)}
-            </Select>
-          </Field>
-        </div>
-        <Field label="分类">
-          <Select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
-            {['教学', '班务', '行政', '家校', '个人'].map((c) => <option key={c} value={c}>{c}</option>)}
-          </Select>
-        </Field>
+      <div className="px-4 py-2">
+        {filtered.length === 0 ? (
+          <EmptyState
+            title="暂无待办"
+            hint="从首页右上角或这里新增一条待办，先只写标题也可以。"
+            action={
+              <Button variant="primary" onClick={() => { setEditing(null); setDrawerOpen(true) }}>
+                新增待办
+              </Button>
+            }
+          />
+        ) : (
+          <ul>
+            {filtered.map((todo) => {
+              const overdue = !todo.doneAt && todo.dueAt != null && todo.dueAt < today
+              return (
+                <li
+                  key={todo.id}
+                  className={`flex min-h-[52px] items-start gap-2.5 border-t border-line py-2.5 first:border-t-0 ${
+                    overdue ? 'border-l-2 border-l-danger-600 pl-2.5' : ''
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    aria-label={`选择：${todo.title}`}
+                    checked={selected.includes(todo.id ?? -1)}
+                    onChange={(event) =>
+                      setSelected((prev) =>
+                        event.target.checked ? [...prev, todo.id ?? -1] : prev.filter((id) => id !== todo.id),
+                      )
+                    }
+                    className="mt-1 h-[18px] w-[18px] shrink-0 accent-[#002FA7]"
+                  />
+                  <input
+                    type="checkbox"
+                    aria-label={`完成待办：${todo.title}`}
+                    checked={Boolean(todo.doneAt)}
+                    onChange={(event) => toggleDone(todo, event.target.checked)}
+                    className="mt-1 h-[18px] w-[18px] shrink-0 accent-[#002FA7]"
+                  />
+                  <button type="button" className="min-w-0 flex-1 text-left" onClick={() => { setEditing(todo); setDrawerOpen(true) }}>
+                    <span
+                      className={`block text-sm leading-5 ${
+                        todo.doneAt ? 'text-ink-500 line-through' : overdue ? 'font-semibold text-danger-600' : 'text-ink-900'
+                      }`}
+                    >
+                      {todo.title}
+                    </span>
+                    <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-500">
+                      <span>{todo.category}</span>
+                      {todo.dueAt && <span>· {todo.dueAt}</span>}
+                      {todo.priority === 'high' && !todo.doneAt && <Badge variant="danger">高优先</Badge>}
+                      {overdue && <Badge variant="danger">逾期</Badge>}
+                      {todo.note && <span>· {todo.note}</span>}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`删除：${todo.title}`}
+                    onClick={() => removeTodo(todo)}
+                    className="grid h-9 w-9 shrink-0 place-items-center rounded-menu text-ink-500 hover:bg-danger-50 hover:text-danger-600"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
       </div>
-    </Modal>
+
+      <TodoDrawer open={drawerOpen} todo={editing} onClose={() => { setDrawerOpen(false); setEditing(null) }} />
+    </Panel>
   )
 }
